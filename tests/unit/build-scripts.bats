@@ -558,8 +558,8 @@ teardown() {
   [[ "$output" == *'embed /usr/share/blade-installer/rootfs.tar.zst.sha256'* ]]
   [[ "$output" == *'embed /usr/share/blade-installer/target-packages.txt'* ]]
   [[ "$output" == *'embed /usr/share/blade-installer/build-manifest.txt'* ]]
-  [[ "$output" == *'patch UEFI default entry'* ]]
-  [[ "$output" == *'patch GRUB default entry'* ]]
+  [[ "$output" == *'replace releng bootmodes with bios.syslinux and uefi.grub'* ]]
+  [[ "$output" == *'patch active UEFI GRUB default entry'* ]]
   [[ "$output" == *'patch Syslinux default entry'* ]]
   [[ "$output" == *'systemd.unit=multi-user.target modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'* ]]
   [[ "$output" == *'Rescue shell (no installer)'*'blade.noinstaller=1'* ]]
@@ -590,7 +590,7 @@ teardown() {
   [[ "$output" == *'verify inner /usr/share/blade-installer/rootfs.tar.zst'* ]]
   [[ "$output" == *'verify inner payload checksum and manifests'* ]]
   [[ "$output" == *'verify inner blade-installer.service and serial test service'* ]]
-  [[ "$output" == *'verify UEFI, GRUB, and Syslinux safe boot arguments'* ]]
+  [[ "$output" == *'verify active UEFI GRUB and BIOS Syslinux boot stanzas'* ]]
   [[ "$output" == *'verify rescue and QEMU-only test entries'* ]]
 }
 
@@ -617,15 +617,24 @@ teardown() {
   done
   grep -F '["/usr/local/bin/blade-qemu-serial-gate"]="0:0:755"' \
     "$ARCHISO_PROFILE_OUTPUT/profiledef.sh"
+  run bash -c '
+    declare -A file_permissions=()
+    source "$1"
+    [[ ${#bootmodes[@]} -eq 2 && ${bootmodes[0]} == bios.syslinux &&
+      ${bootmodes[1]} == uefi.grub ]]
+  ' _ "$ARCHISO_PROFILE_OUTPUT/profiledef.sh"
+  [ "$status" -eq 0 ]
+  ! grep -F 'uefi.systemd-boot' "$ARCHISO_PROFILE_OUTPUT/profiledef.sh"
   [ -L "$ARCHISO_PROFILE_OUTPUT/airootfs/etc/systemd/system/multi-user.target.wants/blade-installer.service" ]
   [ -L "$ARCHISO_PROFILE_OUTPUT/airootfs/etc/systemd/system/multi-user.target.wants/blade-installer-serial.service" ]
   [ -L "$ARCHISO_PROFILE_OUTPUT/airootfs/etc/systemd/system/multi-user.target.wants/blade-qemu-rescue.service" ]
-  grep -F 'blade.noinstaller=1' \
-    "$ARCHISO_PROFILE_OUTPUT/efiboot/loader/entries/90-blade-rescue.conf"
-  grep -F 'blade.test=1' \
-    "$ARCHISO_PROFILE_OUTPUT/efiboot/loader/entries/91-blade-qemu-test.conf"
-  grep -R -F 'QEMU serial rescue test' "$ARCHISO_PROFILE_OUTPUT/efiboot" \
-    "$ARCHISO_PROFILE_OUTPUT/grub" "$ARCHISO_PROFILE_OUTPUT/syslinux"
+  [ ! -e "$ARCHISO_PROFILE_OUTPUT/efiboot/loader/entries/90-blade-rescue.conf" ]
+  grep -R -F 'blade.noinstaller=1' "$ARCHISO_PROFILE_OUTPUT/grub" \
+    "$ARCHISO_PROFILE_OUTPUT/syslinux"
+  grep -R -F 'blade.test=1' "$ARCHISO_PROFILE_OUTPUT/grub" \
+    "$ARCHISO_PROFILE_OUTPUT/syslinux"
+  grep -R -F 'QEMU serial rescue test' "$ARCHISO_PROFILE_OUTPUT/grub" \
+    "$ARCHISO_PROFILE_OUTPUT/syslinux"
   ! grep -R -F '/run/blade-installer' "$ARCHISO_PROFILE_OUTPUT/airootfs"
 }
 
@@ -646,6 +655,27 @@ teardown() {
 
   [ "$status" -ne 0 ]
   [[ "$output" == *'grub/loopback.cfg'* ]]
+  [ "$(cat "$ARCHISO_PROFILE_OUTPUT/sentinel")" = 'preserve me' ]
+}
+
+@test "profile preparation rejects any bootmode baseline other than releng Syslinux plus systemd-boot" {
+  prepare_archiso_fixture
+  mkdir -p "$ARCHISO_PROFILE_OUTPUT"
+  printf 'preserve me\n' >"$ARCHISO_PROFILE_OUTPUT/sentinel"
+  sed -i "s/'uefi.systemd-boot'/'uefi.grub'/" \
+    "$ARCHISO_FIXTURE/releng/profiledef.sh"
+
+  run bash -c '
+    source "$1"
+    RELENG_PROFILE=$2/releng
+    PAYLOAD_DIR=$2/payload
+    PROFILE_DIR=$3
+    AIROOTFS_DIR=$PROFILE_DIR/airootfs
+    prepare_profile
+  ' _ "$PREPARE_ARCHISO" "$ARCHISO_FIXTURE" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'expected bootmodes: bios.syslinux uefi.systemd-boot'* ]]
   [ "$(cat "$ARCHISO_PROFILE_OUTPUT/sentinel")" = 'preserve me' ]
 }
 

@@ -21,7 +21,7 @@ print_plan() {
     'verify inner /usr/share/blade-installer/rootfs.tar.zst' \
     'verify inner payload checksum and manifests' \
     'verify inner blade-installer.service and serial test service' \
-    'verify UEFI, GRUB, and Syslinux safe boot arguments' \
+    'verify active UEFI GRUB and BIOS Syslinux boot stanzas' \
     'verify rescue and QEMU-only test entries'
 }
 
@@ -105,23 +105,13 @@ verify_boot_entries() {
   local file
   local -a grub_files=()
   local -a syslinux_files=()
-  local -a uefi_files=()
-
-  mapfile -d '' -t uefi_files < <(
-    find "$ISO_TREE" -type f -path '*/loader/entries/*.conf' -print0
-  )
-  ((${#uefi_files[@]} > 0)) || die 'ISO has no UEFI loader entries'
-  for file in "${uefi_files[@]}"; do
-    grep -q '^options[[:space:]]' "$file" || continue
-    verify_boot_file_lines "$file" UEFI uefi
-  done
 
   mapfile -d '' -t grub_files < <(
     find "$ISO_TREE" -type f \( -name grub.cfg -o -name loopback.cfg \) -print0
   )
-  ((${#grub_files[@]} >= 2)) || die 'ISO lacks generated GRUB configurations'
+  ((${#grub_files[@]} >= 2)) || die 'ISO lacks active UEFI GRUB configurations'
   for file in "${grub_files[@]}"; do
-    verify_boot_file_lines "$file" GRUB grub
+    verify_boot_file_lines "$file" 'UEFI GRUB' grub
   done
 
   mapfile -d '' -t syslinux_files < <(

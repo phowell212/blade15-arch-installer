@@ -38,13 +38,13 @@ print_plan() {
     'profiledef permission /usr/local/bin/blade-install=0:0:755' \
     'profiledef permission /usr/local/bin/blade-qemu-serial-gate=0:0:755' \
     'profiledef permission /usr/local/lib/blade-installer/common.sh=0:0:755' \
+    'replace releng bootmodes with bios.syslinux and uefi.grub' \
     'enable blade-installer.service, blade-installer-serial.service, and blade-qemu-rescue.service' \
     'embed /usr/share/blade-installer/rootfs.tar.zst' \
     'embed /usr/share/blade-installer/rootfs.tar.zst.sha256' \
     'embed /usr/share/blade-installer/target-packages.txt' \
     'embed /usr/share/blade-installer/build-manifest.txt' \
-    "patch UEFI default entry with $SAFE_BOOT_ARGS" \
-    "patch GRUB default entry with $SAFE_BOOT_ARGS" \
+    "patch active UEFI GRUB default entry with $SAFE_BOOT_ARGS" \
     "patch Syslinux default entry with $SAFE_BOOT_ARGS" \
     "add $RESCUE_LABEL with blade.noinstaller=1" \
     "add $QEMU_TEST_LABEL with $QEMU_TEST_ARGS" \
@@ -55,6 +55,21 @@ require_file() {
   [[ -f "$1" && ! -L "$1" ]] || die "missing or unsafe required file: $1"
 }
 
+profile_has_exact_bootmodes() (
+  local profile=$1
+  local first=$2
+  local second=$3
+
+  unset bootmodes
+  declare -A file_permissions=()
+  # The installed releng profile is trusted build input and defines bootmodes.
+  # shellcheck disable=SC1090
+  source "$profile" >/dev/null
+  declare -p bootmodes >/dev/null 2>&1 || return 1
+  ((${#bootmodes[@]} == 2)) || return 1
+  [[ ${bootmodes[0]} == "$first" && ${bootmodes[1]} == "$second" ]]
+)
+
 validate_inputs() {
   local library
   local payload
@@ -62,6 +77,9 @@ validate_inputs() {
   [[ -d "$RELENG_PROFILE" && ! -L "$RELENG_PROFILE" ]] ||
     die "missing or unsafe archiso releng profile: $RELENG_PROFILE"
   require_file "$RELENG_PROFILE/profiledef.sh"
+  profile_has_exact_bootmodes "$RELENG_PROFILE/profiledef.sh" \
+    bios.syslinux uefi.systemd-boot ||
+    die 'unexpected releng profile; expected bootmodes: bios.syslinux uefi.systemd-boot'
   require_file "$RELENG_PROFILE/packages.x86_64"
   [[ -d "$RELENG_PROFILE/airootfs" ]] ||
     die 'releng profile is missing airootfs'
@@ -125,7 +143,6 @@ append_profile_settings() {
 
 # Blade installer additions. Keep modes explicit so mkarchiso does not inherit
 # host checkout permissions.
-bootmodes+=('uefi.grub')
 file_permissions+=(
   ["/usr/local/bin/blade-install"]="0:0:755"
   ["/usr/local/bin/blade-qemu-serial-gate"]="0:0:755"
@@ -138,35 +155,18 @@ file_permissions+=(
 EOF
 }
 
-add_uefi_entries() {
-  local default_entry
-  local entry
-  local entries_dir="$PROFILE_DIR/efiboot/loader/entries"
-  local -a uefi_entries=()
+replace_bootmode() {
+  local profile="$PROFILE_DIR/profiledef.sh"
+  local count
 
-  mapfile -t uefi_entries < <(grep -l '^options[[:space:]]' "$entries_dir"/*.conf)
-  ((${#uefi_entries[@]} > 0)) || die 'no patchable UEFI Linux entries found'
-  for entry in "${uefi_entries[@]}"; do
-    append_safe_args "$entry" uefi
-  done
-
-  default_entry="$entries_dir/01-archiso-linux.conf"
-  require_file "$default_entry"
-  cp -- "$default_entry" "$entries_dir/90-blade-rescue.conf"
-  sed -i 's/^title[[:space:]].*/title    Rescue shell (no installer)/' \
-    "$entries_dir/90-blade-rescue.conf"
-  sed -i '/^options[[:space:]]/s/$/ blade.noinstaller=1/' \
-    "$entries_dir/90-blade-rescue.conf"
-  cp -- "$default_entry" "$entries_dir/91-blade-qemu-test.conf"
-  sed -i 's/^title[[:space:]].*/title    QEMU serial installer test/' \
-    "$entries_dir/91-blade-qemu-test.conf"
-  sed -i "/^options[[:space:]]/s|$| $QEMU_TEST_ARGS|" \
-    "$entries_dir/91-blade-qemu-test.conf"
-  cp -- "$default_entry" "$entries_dir/92-blade-qemu-rescue.conf"
-  sed -i 's/^title[[:space:]].*/title    QEMU serial rescue test/' \
-    "$entries_dir/92-blade-qemu-rescue.conf"
-  sed -i "/^options[[:space:]]/s|$| $QEMU_TEST_ARGS blade.noinstaller=1|" \
-    "$entries_dir/92-blade-qemu-rescue.conf"
+  count=$(grep -Fo "'uefi.systemd-boot'" "$profile" | wc -l)
+  [[ "$count" -eq 1 ]] ||
+    die 'releng profile must contain one literal uefi.systemd-boot bootmode'
+  sed -i "s/'uefi.systemd-boot'/'uefi.grub'/" "$profile"
+  profile_has_exact_bootmodes "$profile" bios.syslinux uefi.grub ||
+    die 'prepared profile bootmodes must be exactly bios.syslinux and uefi.grub'
+  ! grep -Fq 'uefi.systemd-boot' "$profile" ||
+    die 'prepared profile retained inactive uefi.systemd-boot'
 }
 
 append_grub_entries() {
@@ -300,25 +300,26 @@ verify_prepared_profile() {
     "$PROFILE_DIR/profiledef.sh" || die 'profiledef lacks explicit installer mode'
   grep -Fq '["/usr/local/bin/blade-qemu-serial-gate"]="0:0:755"' \
     "$PROFILE_DIR/profiledef.sh" || die 'profiledef lacks explicit QEMU gate mode'
-  grep -Fq "bootmodes+=('uefi.grub')" "$PROFILE_DIR/profiledef.sh" ||
-    die 'profiledef lacks the GRUB UEFI boot mode'
+  profile_has_exact_bootmodes "$PROFILE_DIR/profiledef.sh" \
+    bios.syslinux uefi.grub ||
+    die 'profiledef active bootmodes are not exactly Syslinux and GRUB'
+  ! grep -Fq 'uefi.systemd-boot' "$PROFILE_DIR/profiledef.sh" ||
+    die 'profiledef retained inactive systemd-boot mode'
   [[ -L "$AIROOTFS_DIR/etc/systemd/system/multi-user.target.wants/blade-installer.service" ]] ||
     die 'blade-installer.service is not enabled'
   [[ -L "$AIROOTFS_DIR/etc/systemd/system/multi-user.target.wants/blade-installer-serial.service" ]] ||
     die 'blade-installer-serial.service is not enabled'
   [[ -L "$AIROOTFS_DIR/etc/systemd/system/multi-user.target.wants/blade-qemu-rescue.service" ]] ||
     die 'blade-qemu-rescue.service is not enabled'
-  grep -R -Fq "$SAFE_BOOT_ARGS" "$PROFILE_DIR/efiboot/loader/entries" ||
-    die 'UEFI entries lack safe boot arguments'
   grep -R -Fq "$SAFE_BOOT_ARGS" "$PROFILE_DIR/grub" ||
-    die 'GRUB entries lack safe boot arguments'
+    die 'active UEFI GRUB entries lack safe boot arguments'
   grep -R -Fq "$SAFE_BOOT_ARGS" "$PROFILE_DIR/syslinux" ||
     die 'Syslinux entries lack safe boot arguments'
-  grep -R -Fq 'blade.noinstaller=1' "$PROFILE_DIR/efiboot" "$PROFILE_DIR/grub" \
+  grep -R -Fq 'blade.noinstaller=1' "$PROFILE_DIR/grub" \
     "$PROFILE_DIR/syslinux" || die 'rescue boot entries are missing'
-  grep -R -Fq 'blade.test=1' "$PROFILE_DIR/efiboot" "$PROFILE_DIR/grub" \
+  grep -R -Fq 'blade.test=1' "$PROFILE_DIR/grub" \
     "$PROFILE_DIR/syslinux" || die 'QEMU test boot entries are missing'
-  grep -R -Fq "$QEMU_RESCUE_LABEL" "$PROFILE_DIR/efiboot" "$PROFILE_DIR/grub" \
+  grep -R -Fq "$QEMU_RESCUE_LABEL" "$PROFILE_DIR/grub" \
     "$PROFILE_DIR/syslinux" || die 'QEMU rescue boot entries are missing'
 }
 
@@ -326,9 +327,9 @@ prepare_profile() {
   validate_inputs
   reset_build_directory "$PROFILE_DIR" >/dev/null
   cp -a -- "$RELENG_PROFILE/." "$PROFILE_DIR/"
+  replace_bootmode
   install_profile_contents
   append_profile_settings
-  add_uefi_entries
   append_grub_entries "$PROFILE_DIR/grub/grub.cfg"
   append_grub_entries "$PROFILE_DIR/grub/loopback.cfg"
   append_syslinux_entries "$PROFILE_DIR/syslinux/archiso_sys-linux.cfg"
