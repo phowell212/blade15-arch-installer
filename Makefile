@@ -10,8 +10,7 @@ static:
 	scripts/ci-static.sh
 
 integration:
-	tests/integration/loop-install.sh
-	tests/integration/qemu-boot.sh
+	./scripts/test-integration.sh
 
 build:
 	scripts/build-iso.sh
