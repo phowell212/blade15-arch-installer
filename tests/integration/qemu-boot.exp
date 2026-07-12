@@ -1,0 +1,116 @@
+#!/usr/bin/expect -f
+
+proc fail {message} {
+    puts stderr "qemu boot failure: $message"
+    exit 1
+}
+
+proc wait_for_boot_menu {} {
+    expect {
+        -re {QEMU serial rescue test} { return }
+        timeout { fail "timed out waiting for the archiso boot menu" }
+        eof { fail "QEMU exited before the archiso boot menu" }
+    }
+}
+
+proc select_from_end {steps_up} {
+    send -- "\033\[F"
+    for {set index 0} {$index < $steps_up} {incr index} {
+        send -- "\033\[A"
+    }
+    send -- "\r"
+}
+
+if {$argc != 6} {
+    fail "usage: qemu-boot.exp MODE ISO DISK OVMF_CODE OVMF_VARS ACCEL"
+}
+
+set mode [lindex $argv 0]
+set iso [lindex $argv 1]
+set disk [lindex $argv 2]
+set ovmf_code [lindex $argv 3]
+set ovmf_vars [lindex $argv 4]
+set accel [lindex $argv 5]
+set timeout 240
+set cpu "max"
+if {$accel eq "kvm"} {
+    set cpu "host"
+}
+if {$mode ne "rescue" && $mode ne "installer"} {
+    fail "mode must be rescue or installer"
+}
+
+set qemu [list qemu-system-x86_64 \
+    -machine "q35,accel=$accel" \
+    -cpu $cpu \
+    -m 2048 \
+    -smp 2 \
+    -nographic \
+    -no-reboot \
+    -boot "order=d,menu=on" \
+    -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
+    -drive "if=pflash,format=raw,file=$ovmf_vars" \
+    -drive "if=none,id=target,format=qcow2,file=$disk" \
+    -device "nvme,drive=target,serial=BLADE-QEMU-TEST" \
+    -drive "media=cdrom,readonly=on,file=$iso" \
+    -smbios "type=1,manufacturer=QEMU,product=Standard PC (Q35 + ICH9, 2009)"]
+
+log_user 1
+spawn {*}$qemu
+wait_for_boot_menu
+
+if {$mode eq "rescue"} {
+    select_from_end 0
+    expect {
+        -re {root@archiso[^#]*#} {}
+        timeout { fail "QEMU serial rescue did not reach a root shell" }
+        eof { fail "QEMU exited before the rescue root shell" }
+    }
+    send -- "tr ' ' '\\n' </proc/cmdline | grep -vx 'blade.test=1' | paste -sd' ' - >/tmp/no-test\r"
+    expect -re {root@archiso[^#]*#}
+    send -- "BLADE_TEST=1 BLADE_FAILURE_SHELL=0 CMDLINE_FILE=/tmp/no-test /usr/local/bin/blade-install\r"
+    expect {
+        -re {unsupported physical platform} {}
+        timeout { fail "QEMU bypass was not rejected without blade.test=1" }
+        eof { fail "QEMU exited before the missing-flag rejection" }
+    }
+    expect -re {root@archiso[^#]*#}
+} else {
+    select_from_end 1
+    expect {
+        -re {Razer Blade Arch Linux Installer} {}
+        timeout { fail "serial installer banner was not displayed" }
+        eof { fail "QEMU exited before the installer banner" }
+    }
+    expect {
+        -re {Safe installation targets:} {}
+        timeout { fail "installer did not enumerate the disposable NVMe disk" }
+        eof { fail "QEMU exited before disk selection" }
+    }
+    expect -re {Select a target number:}
+    send -- "1\r"
+    expect -re {Hostname \[[^]]+\]:}
+    send -- "\r"
+    expect -re {Local username:}
+    send -- "qemutest\r"
+    expect -re {Password:}
+    send -- "qemu-test-password\r"
+    expect -re {Confirm password:}
+    send -- "qemu-test-password\r"
+    expect {
+        -re {Type WIPE exactly} {}
+        timeout { fail "installer did not reach exact WIPE confirmation" }
+        eof { fail "QEMU exited before WIPE confirmation" }
+    }
+    send -- "CANCEL\r"
+    expect {
+        -re {Installation cancelled: WIPE was not entered exactly} {}
+        timeout { fail "CANCEL did not stop before disk modification" }
+        eof { fail "QEMU exited before cancellation was reported" }
+    }
+}
+
+after 500
+send -- "\001x"
+expect eof
+exit 0

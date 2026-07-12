@@ -1,0 +1,15 @@
+[Unit]
+Description=QEMU-only serial rescue shell test
+After=dev-ttyS0.device
+Conflicts=getty@ttyS0.service blade-installer.service blade-installer-serial.service
+ConditionKernelCommandLine=blade.test=1
+ConditionKernelCommandLine=blade.noinstaller=1
+
+[Service]
+Type=idle
+ExecCondition=/usr/local/bin/blade-qemu-serial-gate
+ExecStart=-/usr/bin/agetty --autologin root --noclear 115200 ttyS0 vt100
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

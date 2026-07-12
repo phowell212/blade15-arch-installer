@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+kernel_cmdline_has() {
+  local cmdline_file=$1
+  local expected=$2
+  local cmdline=''
+  local token
+  local -a tokens=()
+
+  [[ -r "$cmdline_file" && -n "$expected" ]] || return 1
+  IFS= read -r cmdline <"$cmdline_file" || [[ -n "$cmdline" ]] || return 1
+  read -r -a tokens <<<"$cmdline"
+  for token in "${tokens[@]}"; do
+    [[ "$token" == "$expected" ]] && return 0
+  done
+  return 1
+}
+
+qemu_dmi_matches() {
+  local vendor_file=$1
+  local product_file=$2
+  local vendor=''
+  local product=''
+  local identity
+
+  [[ -r "$vendor_file" && -r "$product_file" ]] || return 1
+  IFS= read -r vendor <"$vendor_file" || [[ -n "$vendor" ]] || return 1
+  IFS= read -r product <"$product_file" || [[ -n "$product" ]] || return 1
+  identity="${vendor,,} ${product,,}"
+  [[ "$identity" =~ (^|[^a-z0-9])(qemu|kvm)([^a-z0-9]|$) ]]
+}
+
+main() {
+  (($# == 0)) || {
+    printf 'usage: blade-qemu-serial-gate\n' >&2
+    return 2
+  }
+  qemu_dmi_matches /sys/class/dmi/id/sys_vendor \
+    /sys/class/dmi/id/product_name || {
+    printf 'QEMU serial route rejected: DMI is not QEMU/KVM\n' >&2
+    return 1
+  }
+  kernel_cmdline_has /proc/cmdline blade.test=1 || {
+    printf 'QEMU serial route rejected: blade.test=1 is absent\n' >&2
+    return 1
+  }
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

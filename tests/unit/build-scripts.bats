@@ -5,6 +5,68 @@ setup() {
   BUILD_YAY="$REPO_ROOT/scripts/build-yay.sh"
   BUILD_ROOTFS="$REPO_ROOT/scripts/build-rootfs.sh"
   VERIFY_ROOTFS="$REPO_ROOT/scripts/verify-rootfs.sh"
+  PREPARE_ARCHISO="$REPO_ROOT/scripts/prepare-archiso.sh"
+  BUILD_ISO="$REPO_ROOT/scripts/build-iso.sh"
+  VERIFY_ARTIFACTS="$REPO_ROOT/scripts/verify-artifacts.sh"
+}
+
+prepare_archiso_fixture() {
+  # shellcheck source=/dev/null
+  source "$REPO_ROOT/scripts/lib/build-common.sh"
+  ARCHISO_FIXTURE="$BUILD_DIR/task-6-releng-fixture-${BATS_TEST_NUMBER}"
+  ARCHISO_PROFILE_OUTPUT="$BUILD_DIR/task-6-profile-fixture-${BATS_TEST_NUMBER}"
+  reset_build_directory "$ARCHISO_FIXTURE" >/dev/null
+  mkdir -p \
+    "$ARCHISO_FIXTURE/releng/airootfs" \
+    "$ARCHISO_FIXTURE/releng/efiboot/loader/entries" \
+    "$ARCHISO_FIXTURE/releng/grub" \
+    "$ARCHISO_FIXTURE/releng/syslinux" \
+    "$ARCHISO_FIXTURE/payload"
+  cat >"$ARCHISO_FIXTURE/releng/profiledef.sh" <<'EOF'
+#!/usr/bin/env bash
+bootmodes=('bios.syslinux' 'uefi.systemd-boot')
+file_permissions=(["/etc/shadow"]="0:0:400")
+EOF
+  printf 'base\nbash\n' >"$ARCHISO_FIXTURE/releng/packages.x86_64"
+  cat >"$ARCHISO_FIXTURE/releng/efiboot/loader/entries/01-archiso-linux.conf" <<'EOF'
+title    Arch Linux install medium
+linux    /arch/boot/x86_64/vmlinuz-linux
+initrd   /arch/boot/x86_64/initramfs-linux.img
+options  archisobasedir=arch archisosearchuuid=ARCH_TEST
+EOF
+  cat >"$ARCHISO_FIXTURE/releng/efiboot/loader/entries/02-archiso-speech-linux.conf" <<'EOF'
+title    Arch Linux install medium with speech
+linux    /arch/boot/x86_64/vmlinuz-linux
+initrd   /arch/boot/x86_64/initramfs-linux.img
+options  archisobasedir=arch archisosearchuuid=ARCH_TEST accessibility=on
+EOF
+  printf 'timeout 15\ndefault 01-archiso-linux.conf\n' \
+    >"$ARCHISO_FIXTURE/releng/efiboot/loader/loader.conf"
+  cat >"$ARCHISO_FIXTURE/releng/grub/grub.cfg" <<'EOF'
+menuentry 'Arch Linux install medium' {
+  linux /arch/boot/x86_64/vmlinuz-linux archisobasedir=arch archisosearchuuid=ARCH_TEST
+  initrd /arch/boot/x86_64/initramfs-linux.img
+}
+EOF
+  cp "$ARCHISO_FIXTURE/releng/grub/grub.cfg" \
+    "$ARCHISO_FIXTURE/releng/grub/loopback.cfg"
+  cat >"$ARCHISO_FIXTURE/releng/syslinux/archiso_sys-linux.cfg" <<'EOF'
+LABEL arch
+MENU LABEL Arch Linux install medium
+LINUX /arch/boot/x86_64/vmlinuz-linux
+INITRD /arch/boot/x86_64/initramfs-linux.img
+APPEND archisobasedir=arch archisosearchuuid=ARCH_TEST
+EOF
+  cp "$ARCHISO_FIXTURE/releng/syslinux/archiso_sys-linux.cfg" \
+    "$ARCHISO_FIXTURE/releng/syslinux/archiso_pxe-linux.cfg"
+  printf 'fixture payload\n' >"$ARCHISO_FIXTURE/payload/rootfs.tar.zst"
+  (
+    cd "$ARCHISO_FIXTURE/payload"
+    sha256sum rootfs.tar.zst >rootfs.tar.zst.sha256
+  )
+  printf 'base 1.0-1\n' >"$ARCHISO_FIXTURE/payload/target-packages.txt"
+  printf 'rootfs_sha256=fixture\n' \
+    >"$ARCHISO_FIXTURE/payload/build-manifest.txt"
 }
 
 prepare_manifest_fixture() {
@@ -64,6 +126,14 @@ teardown() {
   if [[ -n ${MANIFEST_FIXTURE:-} && -e $MANIFEST_FIXTURE ]]; then
     reset_build_directory "$MANIFEST_FIXTURE" >/dev/null
     rmdir "$MANIFEST_FIXTURE"
+  fi
+  if [[ -n ${ARCHISO_PROFILE_OUTPUT:-} && -d $ARCHISO_PROFILE_OUTPUT ]]; then
+    clear_build_directory "$ARCHISO_PROFILE_OUTPUT" >/dev/null
+    rmdir "$ARCHISO_PROFILE_OUTPUT"
+  fi
+  if [[ -n ${ARCHISO_FIXTURE:-} && -d $ARCHISO_FIXTURE ]]; then
+    clear_build_directory "$ARCHISO_FIXTURE" >/dev/null
+    rmdir "$ARCHISO_FIXTURE"
   fi
 }
 
@@ -466,4 +536,228 @@ teardown() {
   [[ "$output" == *'verify no credentials, auth/session files, SSH host keys, or machine-id'* ]]
   [[ "$output" == *'verify yay --version and codex --version in arch-chroot'* ]]
   [[ "$output" == *'verify codex version contains 0.144.1'* ]]
+}
+
+@test "archiso dry-run plans a complete boot-safe releng profile" {
+  run env BLADE_DRY_RUN=1 "$PREPARE_ARCHISO"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'copy /usr/share/archiso/configs/releng to build/archiso-profile'* ]]
+  while IFS= read -r package; do
+    [[ -z "$package" ]] && continue
+    [[ "$output" == *"append live package: $package"* ]]
+  done <"$REPO_ROOT/packages/live.txt"
+  [[ "$output" == *'install /usr/local/bin/blade-install mode 0755'* ]]
+  for library in common disks identity install preflight; do
+    [[ "$output" == *"install /usr/local/lib/blade-installer/$library.sh mode 0755"* ]]
+  done
+  [[ "$output" == *'profiledef permission /usr/local/bin/blade-install=0:0:755'* ]]
+  [[ "$output" == *'profiledef permission /usr/local/lib/blade-installer/common.sh=0:0:755'* ]]
+  [[ "$output" == *'enable blade-installer.service'* ]]
+  [[ "$output" == *'embed /usr/share/blade-installer/rootfs.tar.zst'* ]]
+  [[ "$output" == *'embed /usr/share/blade-installer/rootfs.tar.zst.sha256'* ]]
+  [[ "$output" == *'embed /usr/share/blade-installer/target-packages.txt'* ]]
+  [[ "$output" == *'embed /usr/share/blade-installer/build-manifest.txt'* ]]
+  [[ "$output" == *'patch UEFI default entry'* ]]
+  [[ "$output" == *'patch GRUB default entry'* ]]
+  [[ "$output" == *'patch Syslinux default entry'* ]]
+  [[ "$output" == *'systemd.unit=multi-user.target modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'* ]]
+  [[ "$output" == *'Rescue shell (no installer)'*'blade.noinstaller=1'* ]]
+  [[ "$output" == *'QEMU serial installer test'*'blade.test=1'*'console=ttyS0,115200n8'* ]]
+  [[ "$output" != *'/run/blade-installer'* ]]
+}
+
+@test "ISO dry-run keeps work and outputs in the repository and names release artifacts" {
+  run env BLADE_DRY_RUN=1 "$BUILD_ISO"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'prepare-archiso.sh'* ]]
+  [[ "$output" == *'mkarchiso -v -w'*'/build/archiso-work -o'*'/dist'*'/build/archiso-profile'* ]]
+  [[ "$output" == *'blade15-arch-gnome-${BUILD_DATE}-${GIT_REV}.iso'* ]]
+  [[ "$output" == *'generate ISO SHA-256 sidecar'* ]]
+  [[ "$output" == *'copy target-packages.txt and build-manifest.txt to dist'* ]]
+}
+
+@test "artifact verifier dry-run inspects the inner airootfs image" {
+  run env BLADE_DRY_RUN=1 "$VERIFY_ARTIFACTS"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'verify ISO SHA-256 sidecar'* ]]
+  [[ "$output" == *'verify hybrid BIOS and UEFI boot structures'* ]]
+  [[ "$output" == *'extract the airootfs image from the ISO'* ]]
+  [[ "$output" == *'unsquashfs'* ]]
+  [[ "$output" == *'verify inner /usr/local/bin/blade-install mode 0755'* ]]
+  [[ "$output" == *'verify inner /usr/share/blade-installer/rootfs.tar.zst'* ]]
+  [[ "$output" == *'verify inner payload checksum and manifests'* ]]
+  [[ "$output" == *'verify inner blade-installer.service and serial test service'* ]]
+  [[ "$output" == *'verify UEFI, GRUB, and Syslinux safe boot arguments'* ]]
+  [[ "$output" == *'verify rescue and QEMU-only test entries'* ]]
+}
+
+@test "profile preparation mutates a releng fixture and keeps test routing isolated" {
+  prepare_archiso_fixture
+
+  run bash -c '
+    source "$1"
+    RELENG_PROFILE=$2/releng
+    PAYLOAD_DIR=$2/payload
+    PROFILE_DIR=$3
+    AIROOTFS_DIR=$PROFILE_DIR/airootfs
+    prepare_profile
+  ' _ "$PREPARE_ARCHISO" "$ARCHISO_FIXTURE" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+  [ -x "$ARCHISO_PROFILE_OUTPUT/airootfs/usr/local/bin/blade-install" ]
+  [ -x "$ARCHISO_PROFILE_OUTPUT/airootfs/usr/local/bin/blade-qemu-serial-gate" ]
+  for library in common disks identity install preflight; do
+    [ -x "$ARCHISO_PROFILE_OUTPUT/airootfs/usr/local/lib/blade-installer/$library.sh" ]
+    grep -F \
+      "[\"/usr/local/lib/blade-installer/$library.sh\"]=\"0:0:755\"" \
+      "$ARCHISO_PROFILE_OUTPUT/profiledef.sh"
+  done
+  grep -F '["/usr/local/bin/blade-qemu-serial-gate"]="0:0:755"' \
+    "$ARCHISO_PROFILE_OUTPUT/profiledef.sh"
+  [ -L "$ARCHISO_PROFILE_OUTPUT/airootfs/etc/systemd/system/multi-user.target.wants/blade-installer.service" ]
+  [ -L "$ARCHISO_PROFILE_OUTPUT/airootfs/etc/systemd/system/multi-user.target.wants/blade-installer-serial.service" ]
+  [ -L "$ARCHISO_PROFILE_OUTPUT/airootfs/etc/systemd/system/multi-user.target.wants/blade-qemu-rescue.service" ]
+  grep -F 'blade.noinstaller=1' \
+    "$ARCHISO_PROFILE_OUTPUT/efiboot/loader/entries/90-blade-rescue.conf"
+  grep -F 'blade.test=1' \
+    "$ARCHISO_PROFILE_OUTPUT/efiboot/loader/entries/91-blade-qemu-test.conf"
+  grep -R -F 'QEMU serial rescue test' "$ARCHISO_PROFILE_OUTPUT/efiboot" \
+    "$ARCHISO_PROFILE_OUTPUT/grub" "$ARCHISO_PROFILE_OUTPUT/syslinux"
+  ! grep -R -F '/run/blade-installer' "$ARCHISO_PROFILE_OUTPUT/airootfs"
+}
+
+@test "profile preparation fails before cleanup when a releng family is absent" {
+  prepare_archiso_fixture
+  mkdir -p "$ARCHISO_PROFILE_OUTPUT"
+  printf 'preserve me\n' >"$ARCHISO_PROFILE_OUTPUT/sentinel"
+  rm "$ARCHISO_FIXTURE/releng/grub/loopback.cfg"
+
+  run bash -c '
+    source "$1"
+    RELENG_PROFILE=$2/releng
+    PAYLOAD_DIR=$2/payload
+    PROFILE_DIR=$3
+    AIROOTFS_DIR=$PROFILE_DIR/airootfs
+    prepare_profile
+  ' _ "$PREPARE_ARCHISO" "$ARCHISO_FIXTURE" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'grub/loopback.cfg'* ]]
+  [ "$(cat "$ARCHISO_PROFILE_OUTPUT/sentinel")" = 'preserve me' ]
+}
+
+@test "QEMU serial services require a real kernel flag and QEMU or KVM DMI" {
+  local gate="$REPO_ROOT/src/live-rootfs/usr/local/bin/blade-qemu-serial-gate"
+  local physical="$REPO_ROOT/src/live-rootfs/etc/systemd/system/blade-installer.service"
+  local serial="$REPO_ROOT/src/live-rootfs/etc/systemd/system/blade-installer-serial.service"
+  local rescue="$REPO_ROOT/src/live-rootfs/etc/systemd/system/blade-qemu-rescue.service"
+  prepare_archiso_fixture
+
+  run bash -c '
+    source "$1"
+    fixture=$2
+    printf "QEMU\n" >"$fixture/vendor"
+    printf "Standard PC (Q35 + ICH9, 2009)\n" >"$fixture/product"
+    printf "archisobasedir=arch blade.test=1\n" >"$fixture/cmdline"
+    qemu_dmi_matches "$fixture/vendor" "$fixture/product" &&
+      kernel_cmdline_has "$fixture/cmdline" blade.test=1 &&
+      ! kernel_cmdline_has "$fixture/cmdline" BLADE_TEST=1 &&
+      printf "Razer\n" >"$fixture/vendor" &&
+      ! qemu_dmi_matches "$fixture/vendor" "$fixture/product"
+  ' _ "$gate" "$ARCHISO_FIXTURE"
+
+  [ "$status" -eq 0 ]
+  grep -Fx 'TTYPath=/dev/tty1' "$physical"
+  grep -Fx 'ConditionKernelCommandLine=!blade.test=1' "$physical"
+  grep -Fx 'TTYPath=/dev/ttyS0' "$serial"
+  grep -Fx 'ConditionKernelCommandLine=blade.test=1' "$serial"
+  grep -Fx 'ConditionKernelCommandLine=!blade.noinstaller=1' "$serial"
+  grep -Fx 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' "$serial"
+  grep -Fx 'ConditionKernelCommandLine=blade.noinstaller=1' "$rescue"
+  grep -Fx 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' "$rescue"
+}
+
+@test "QEMU harness boots OVMF rescue and cancels before WIPE" {
+  local harness="$REPO_ROOT/tests/integration/qemu-boot.sh"
+  local expect_script="$REPO_ROOT/tests/integration/qemu-boot.exp"
+
+  [ -x "$harness" ]
+  [ -x "$expect_script" ]
+  grep -F 'qemu-system-x86_64' "$expect_script"
+  grep -F 'manufacturer=QEMU' "$expect_script"
+  grep -F 'product=Standard PC (Q35 + ICH9, 2009)' "$expect_script"
+  grep -F 'QEMU serial rescue test' "$expect_script"
+  grep -F 'BLADE_TEST=1' "$expect_script"
+  grep -F 'unsupported physical platform' "$expect_script"
+  grep -F 'Safe installation targets:' "$expect_script"
+  grep -F 'Type WIPE exactly' "$expect_script"
+  grep -F 'CANCEL' "$expect_script"
+  grep -F 'qemu-img map --output=json' "$harness"
+  grep -F 'qemu boot: PASS' "$harness"
+}
+
+@test "live banner identifies the destructive installer" {
+  run grep -F 'Razer Blade Arch Linux Installer' "$REPO_ROOT/src/live-rootfs/etc/motd"
+
+  [ "$status" -eq 0 ]
+  grep -F 'requires exact WIPE confirmation' "$REPO_ROOT/src/live-rootfs/etc/motd"
+}
+
+@test "ISO checksum sidecar is bound to the selected release filename" {
+  prepare_archiso_fixture
+  mkdir -p "$ARCHISO_FIXTURE/dist"
+  printf 'selected ISO bytes\n' >"$ARCHISO_FIXTURE/dist/selected.iso"
+  printf 'decoy ISO bytes\n' >"$ARCHISO_FIXTURE/dist/decoy.iso"
+
+  run bash -c '
+    source "$1"
+    iso=$2/selected.iso
+    (
+      cd "$2"
+      sha256sum selected.iso >selected.iso.sha256
+    )
+    verify_iso_sidecar "$iso"
+    (
+      cd "$2"
+      sha256sum decoy.iso >selected.iso.sha256
+    )
+    set +e
+    verify_iso_sidecar "$iso"
+    mismatch_status=$?
+    set -e
+    [[ $mismatch_status -ne 0 ]]
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_FIXTURE/dist"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "inner build manifest digest is bound to the embedded payload" {
+  prepare_archiso_fixture
+  mkdir -p "$ARCHISO_FIXTURE/inner/usr/share/blade-installer"
+
+  run bash -c '
+    source "$1"
+    INNER_ROOT=$2/inner
+    payload_dir=$INNER_ROOT/usr/share/blade-installer
+    printf "inner payload bytes\n" >"$payload_dir/rootfs.tar.zst"
+    (
+      cd "$payload_dir"
+      sha256sum rootfs.tar.zst >rootfs.tar.zst.sha256
+    )
+    digest=$(sha256sum "$payload_dir/rootfs.tar.zst")
+    digest=${digest%% *}
+    printf "rootfs_sha256=%s\n" "$digest" >"$payload_dir/build-manifest.txt"
+    verify_payload_sidecar
+    printf "rootfs_sha256=%064d\n" 0 >"$payload_dir/build-manifest.txt"
+    set +e
+    verify_payload_sidecar
+    mismatch_status=$?
+    set -e
+    [[ $mismatch_status -ne 0 ]]
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_FIXTURE"
+
+  [ "$status" -eq 0 ]
 }

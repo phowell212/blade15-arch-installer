@@ -2,11 +2,13 @@
 Description=Razer Blade confirmed-wipe Arch Linux installer
 Conflicts=getty@tty1.service
 ConditionKernelCommandLine=!blade.noinstaller=1
+ConditionKernelCommandLine=!blade.test=1
 StartLimitIntervalSec=300
 StartLimitBurst=2
 
 [Service]
 Type=simple
+ExecStartPre=/usr/bin/cat /etc/motd
 ExecStart=/usr/local/bin/blade-install
 StandardInput=tty
 StandardOutput=tty

@@ -1,0 +1,4 @@
+Razer Blade Arch Linux Installer
+
+This offline installer erases only the disk selected after it requires exact WIPE confirmation.
+Use "Rescue shell (no installer)" for non-destructive recovery.
