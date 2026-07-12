@@ -9,11 +9,14 @@ DIST_DIR="$REPO_ROOT/dist"
 VERIFY_DIR="$BUILD_DIR/artifact-verify"
 ISO_TREE="$VERIFY_DIR/iso"
 INNER_ROOT="$VERIFY_DIR/airootfs"
-SAFE_BOOT_ARGS='systemd.unit=multi-user.target modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'
+SAFE_UNIT_ARG='systemd.unit=multi-user.target'
+SAFE_BLACKLIST_ARG='modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'
 RESCUE_LABEL='Rescue shell (no installer)'
 QEMU_TEST_LABEL='QEMU serial installer test'
 QEMU_RESCUE_LABEL='QEMU serial rescue test'
-QEMU_TEST_ARGS='blade.test=1 console=tty0 console=ttyS0,115200n8'
+TEST_ARG='blade.test=1'
+TTY_CONSOLE_ARG='console=tty0'
+SERIAL_CONSOLE_ARG='console=ttyS0,115200n8'
 
 print_plan() {
   printf '%s\n' \
@@ -89,22 +92,6 @@ verify_payload_sidecar() {
     die 'inner build manifest digest does not match the payload'
 }
 
-verify_boot_file_lines() {
-  local file=$1
-  local family=$2
-  local kind=$3
-
-  awk -v args="$SAFE_BOOT_ARGS" -v kind="$kind" '
-    kind == "uefi" && $1 == "options" { count++; if (index($0, args) == 0) exit 42 }
-    kind == "grub" && $1 == "linux" && /\/vmlinuz-linux([[:space:]]|$)/ {
-      count++
-      if (index($0, args) == 0) exit 42
-    }
-    kind == "syslinux" && $1 == "APPEND" { count++; if (index($0, args) == 0) exit 42 }
-    END { if (count == 0) exit 43 }
-  ' "$file" || die "$family artifact has an unsafe or missing Linux boot entry: $file"
-}
-
 extract_grub_stanza() {
   local file=$1
   local marker=$2
@@ -118,6 +105,22 @@ extract_grub_stanza() {
     active && /^}/ { active = 0 }
     END { if (found != 1 || active) exit 42 }
   ' "$file"
+}
+
+extract_grub_kernel_args() {
+  local block=$1
+
+  awk '
+    $1 == "linux" && $2 ~ /\/vmlinuz-linux$/ {
+      count++
+      line = ""
+      for (field = 3; field <= NF; field++) {
+        line = line (line == "" ? "" : " ") $field
+      }
+      print line
+    }
+    END { if (count != 1) exit 42 }
+  ' <<<"$block"
 }
 
 extract_syslinux_stanza() {
@@ -134,6 +137,23 @@ extract_syslinux_stanza() {
   ' "$file"
 }
 
+extract_syslinux_kernel_args() {
+  local block=$1
+
+  awk '
+    $1 == "LINUX" && $2 ~ /\/vmlinuz-linux$/ { linux_count++ }
+    $1 == "APPEND" {
+      append_count++
+      line = ""
+      for (field = 2; field <= NF; field++) {
+        line = line (line == "" ? "" : " ") $field
+      }
+      print line
+    }
+    END { if (linux_count != 1 || append_count != 1) exit 42 }
+  ' <<<"$block"
+}
+
 require_stanza_values() {
   local block=$1
   local description=$2
@@ -148,77 +168,207 @@ require_stanza_values() {
   done
 }
 
+kernel_token_count() {
+  local arguments=$1
+  local expected=$2
+  local count=0
+  local token
+  local -a tokens=()
+
+  read -r -a tokens <<<"$arguments"
+  for token in "${tokens[@]}"; do
+    [[ "$token" == "$expected" ]] && ((count += 1))
+  done
+  printf '%d\n' "$count"
+}
+
+require_kernel_token() {
+  local arguments=$1
+  local expected=$2
+  local description=$3
+  local count
+
+  count=$(kernel_token_count "$arguments" "$expected")
+  [[ "$count" -eq 1 ]] ||
+    die "$description must contain exactly one kernel token: $expected"
+}
+
+forbid_kernel_token() {
+  local arguments=$1
+  local forbidden=$2
+  local description=$3
+  local count
+
+  count=$(kernel_token_count "$arguments" "$forbidden")
+  [[ "$count" -eq 0 ]] || die "$description contains forbidden kernel token: $forbidden"
+}
+
+validate_route_kernel_args() {
+  local arguments=$1
+  local route=$2
+  local description=$3
+
+  require_kernel_token "$arguments" "$SAFE_UNIT_ARG" "$description" || return
+  require_kernel_token "$arguments" "$SAFE_BLACKLIST_ARG" "$description" || return
+
+  case "$route" in
+    normal)
+      forbid_kernel_token "$arguments" "$TEST_ARG" "$description" || return
+      forbid_kernel_token "$arguments" 'blade.noinstaller=1' "$description" || return
+      forbid_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
+      forbid_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return
+      ;;
+    rescue)
+      require_kernel_token "$arguments" 'blade.noinstaller=1' "$description" || return
+      forbid_kernel_token "$arguments" "$TEST_ARG" "$description" || return
+      forbid_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
+      forbid_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return
+      ;;
+    qemu-installer)
+      require_kernel_token "$arguments" "$TEST_ARG" "$description" || return
+      require_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
+      require_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return
+      forbid_kernel_token "$arguments" 'blade.noinstaller=1' "$description" || return
+      ;;
+    qemu-rescue)
+      require_kernel_token "$arguments" "$TEST_ARG" "$description" || return
+      require_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
+      require_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return
+      require_kernel_token "$arguments" 'blade.noinstaller=1' "$description" || return
+      ;;
+    *) die "unknown boot route: $route" || return ;;
+  esac
+}
+
+verify_grub_block_route() {
+  local block=$1
+  local route=$2
+  local description=$3
+  local arguments
+
+  arguments=$(extract_grub_kernel_args "$block") || {
+    die "$description must contain exactly one active GRUB linux line"
+    return
+  }
+  validate_route_kernel_args "$arguments" "$route" "$description"
+}
+
+verify_grub_normal_routes() {
+  local file=$1
+  local arguments
+  local -a normal_arguments=()
+
+  mapfile -t normal_arguments < <(
+    awk '
+      /^menuentry[[:space:]]/ { custom = index($0, "--id '\''blade-") > 0 }
+      !custom && $1 == "linux" && $2 ~ /\/vmlinuz-linux$/ {
+        line = ""
+        for (field = 3; field <= NF; field++) {
+          line = line (line == "" ? "" : " ") $field
+        }
+        print line
+      }
+    ' "$file"
+  )
+  ((${#normal_arguments[@]} > 0)) || {
+    die "UEFI GRUB has no normal Linux route: $file"
+    return
+  }
+  for arguments in "${normal_arguments[@]}"; do
+    validate_route_kernel_args "$arguments" normal 'UEFI GRUB normal route' || return
+  done
+}
+
 verify_grub_stanzas() {
   local file=$1
   local block
 
-  verify_boot_file_lines "$file" 'UEFI GRUB' grub || return
+  verify_grub_normal_routes "$file" || return
   block=$(extract_grub_stanza "$file" "--id 'archlinux'") ||
     die "UEFI GRUB default stanza is missing or duplicated: $file"
   require_stanza_values "$block" 'UEFI GRUB default stanza' \
-    'Arch Linux install medium' "$SAFE_BOOT_ARGS" || return
+    'Arch Linux install medium' || return
+  verify_grub_block_route "$block" normal 'UEFI GRUB default stanza' || return
   block=$(extract_grub_stanza "$file" "--id 'blade-rescue'") ||
     die "UEFI GRUB rescue stanza is missing or duplicated: $file"
   require_stanza_values "$block" 'UEFI GRUB rescue stanza' \
-    "menuentry '$RESCUE_LABEL'" "$SAFE_BOOT_ARGS" 'blade.noinstaller=1' || return
+    "menuentry '$RESCUE_LABEL'" || return
+  verify_grub_block_route "$block" rescue 'UEFI GRUB rescue stanza' || return
   block=$(extract_grub_stanza "$file" "--id 'blade-qemu-test'") ||
     die "UEFI GRUB QEMU test stanza is missing or duplicated: $file"
   require_stanza_values "$block" 'UEFI GRUB QEMU test stanza' \
-    "menuentry '$QEMU_TEST_LABEL'" "$SAFE_BOOT_ARGS" "$QEMU_TEST_ARGS" || return
+    "menuentry '$QEMU_TEST_LABEL'" || return
+  verify_grub_block_route "$block" qemu-installer 'UEFI GRUB QEMU test stanza' || return
   block=$(extract_grub_stanza "$file" "--id 'blade-qemu-rescue'") ||
     die "UEFI GRUB QEMU rescue stanza is missing or duplicated: $file"
   require_stanza_values "$block" 'UEFI GRUB QEMU rescue stanza' \
-    "menuentry '$QEMU_RESCUE_LABEL'" "$SAFE_BOOT_ARGS" "$QEMU_TEST_ARGS" \
-    'blade.noinstaller=1' || return
+    "menuentry '$QEMU_RESCUE_LABEL'" || return
+  verify_grub_block_route "$block" qemu-rescue 'UEFI GRUB QEMU rescue stanza' || return
 }
 
-verify_syslinux_default_stanzas() {
+verify_syslinux_normal_routes() {
   local file=$1
+  local arguments
+  local block
+  local label
+  local -a labels=()
 
-  awk -v safe="$SAFE_BOOT_ARGS" '
-    function verify_previous() {
-      if (label != "" && label !~ /^blade-/ && has_linux) {
-        defaults++
-        if (index(block, safe) == 0) exit 42
-      }
+  mapfile -t labels < <(
+    awk '$1 == "LABEL" && $2 !~ /^blade-/ { print $2 }' "$file"
+  )
+  ((${#labels[@]} > 0)) || {
+    die "BIOS Syslinux has no normal route: $file"
+    return
+  }
+  for label in "${labels[@]}"; do
+    block=$(extract_syslinux_stanza "$file" "$label") || {
+      die "BIOS Syslinux normal stanza is missing or duplicated: $label"
+      return
     }
-    $1 == "LABEL" {
-      verify_previous()
-      label = $2
-      block = $0
-      has_linux = 0
-      next
+    arguments=$(extract_syslinux_kernel_args "$block") || {
+      die "BIOS Syslinux normal stanza lacks one active APPEND line: $label"
+      return
     }
-    label != "" && $0 !~ /^[[:space:]]*#/ {
-      block = block "\n" $0
-      if ($1 == "LINUX" && $0 ~ /\/vmlinuz-linux([[:space:]]|$)/) has_linux = 1
-    }
-    END {
-      verify_previous()
-      if (defaults == 0) exit 43
-    }
-  ' "$file" || die "BIOS Syslinux default stanza is unsafe or missing: $file"
+    validate_route_kernel_args "$arguments" normal \
+      "BIOS Syslinux normal stanza $label" || return
+  done
+}
+
+verify_syslinux_block_route() {
+  local block=$1
+  local route=$2
+  local description=$3
+  local arguments
+
+  arguments=$(extract_syslinux_kernel_args "$block") || {
+    die "$description must contain one active LINUX and APPEND line"
+    return
+  }
+  validate_route_kernel_args "$arguments" "$route" "$description"
 }
 
 verify_syslinux_stanzas() {
   local file=$1
   local block
 
-  verify_boot_file_lines "$file" 'BIOS Syslinux' syslinux || return
-  verify_syslinux_default_stanzas "$file" || return
+  verify_syslinux_normal_routes "$file" || return
   block=$(extract_syslinux_stanza "$file" blade-rescue) ||
     die "BIOS Syslinux rescue stanza is missing or duplicated: $file"
   require_stanza_values "$block" 'BIOS Syslinux rescue stanza' \
-    "MENU LABEL $RESCUE_LABEL" "$SAFE_BOOT_ARGS" 'blade.noinstaller=1' || return
+    "MENU LABEL $RESCUE_LABEL" || return
+  verify_syslinux_block_route "$block" rescue 'BIOS Syslinux rescue stanza' || return
   block=$(extract_syslinux_stanza "$file" blade-qemu-test) ||
     die "BIOS Syslinux QEMU test stanza is missing or duplicated: $file"
   require_stanza_values "$block" 'BIOS Syslinux QEMU test stanza' \
-    "MENU LABEL $QEMU_TEST_LABEL" "$SAFE_BOOT_ARGS" "$QEMU_TEST_ARGS" || return
+    "MENU LABEL $QEMU_TEST_LABEL" || return
+  verify_syslinux_block_route "$block" qemu-installer \
+    'BIOS Syslinux QEMU test stanza' || return
   block=$(extract_syslinux_stanza "$file" blade-qemu-rescue) ||
     die "BIOS Syslinux QEMU rescue stanza is missing or duplicated: $file"
   require_stanza_values "$block" 'BIOS Syslinux QEMU rescue stanza' \
-    "MENU LABEL $QEMU_RESCUE_LABEL" "$SAFE_BOOT_ARGS" "$QEMU_TEST_ARGS" \
-    'blade.noinstaller=1' || return
+    "MENU LABEL $QEMU_RESCUE_LABEL" || return
+  verify_syslinux_block_route "$block" qemu-rescue \
+    'BIOS Syslinux QEMU rescue stanza' || return
 }
 
 verify_boot_entries() {

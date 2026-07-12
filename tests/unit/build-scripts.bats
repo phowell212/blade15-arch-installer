@@ -1097,3 +1097,151 @@ teardown() {
 
   [ "$status" -eq 0 ]
 }
+
+@test "artifact route verification ignores echo and other-line kernel-flag decoys" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    route_args="blade.test=1 console=tty0 console=ttyS0,115200n8"
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      cp "$file" "$file.clean"
+      if [[ $kind == grub ]]; then
+        sed -i "/--id .blade-qemu-test./,/^}/s/ $route_args//" "$file"
+        sed -i "/--id .blade-qemu-test./a\\    echo $route_args" "$file"
+      else
+        sed -i "/^LABEL blade-qemu-test$/,/^LABEL /s/ $route_args//" "$file"
+        sed -i "/^LABEL blade-qemu-test$/a\\ECHO $route_args" "$file"
+      fi
+      set +e
+      verify_boot_entries >/dev/null 2>&1
+      verify_status=$?
+      set -e
+      mv "$file.clean" "$file"
+      [[ $verify_status -ne 0 ]] || exit 1
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact route verification forbids noinstaller on normal and QEMU installer routes" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      for route in normal qemu; do
+        cp "$file" "$file.clean"
+        if [[ $kind == grub && $route == normal ]]; then
+          sed -i "/--id .archlinux./,/^}/s|^\([[:space:]]*linux .*/vmlinuz-linux.*\)$|\1 blade.noinstaller=1|" "$file"
+        elif [[ $kind == grub ]]; then
+          sed -i "/--id .blade-qemu-test./,/^}/s|^\([[:space:]]*linux .*/vmlinuz-linux.*\)$|\1 blade.noinstaller=1|" "$file"
+        elif [[ $route == normal ]]; then
+          sed -i "/^LABEL arch$/,/^LABEL /s/^APPEND .*/& blade.noinstaller=1/" "$file"
+        else
+          sed -i "/^LABEL blade-qemu-test$/,/^LABEL /s/^APPEND .*/& blade.noinstaller=1/" "$file"
+        fi
+        set +e
+        verify_boot_entries >/dev/null 2>&1
+        verify_status=$?
+        set -e
+        mv "$file.clean" "$file"
+        [[ $verify_status -ne 0 ]] || exit 1
+      done
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact route verification forbids test and serial tokens on physical rescue" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    route_args="blade.test=1 console=tty0 console=ttyS0,115200n8"
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      cp "$file" "$file.clean"
+      if [[ $kind == grub ]]; then
+        sed -i "/--id .blade-rescue./,/^}/s|^\([[:space:]]*linux .*/vmlinuz-linux.*\)$|\1 $route_args|" "$file"
+      else
+        sed -i "/^LABEL blade-rescue$/,/^LABEL /s/^APPEND .*/& $route_args/" "$file"
+      fi
+      set +e
+      verify_boot_entries >/dev/null 2>&1
+      verify_status=$?
+      set -e
+      mv "$file.clean" "$file"
+      [[ $verify_status -ne 0 ]] || exit 1
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact route verification rejects kernel-token substring near misses" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      for route in normal qemu; do
+        cp "$file" "$file.clean"
+        if [[ $kind == grub && $route == normal ]]; then
+          sed -i "/--id .archlinux./,/^}/s/systemd.unit=multi-user.target/xsystemd.unit=multi-user.target/" "$file"
+        elif [[ $kind == grub ]]; then
+          sed -i "/--id .blade-qemu-test./,/^}/s/blade.test=1/xblade.test=1/" "$file"
+        elif [[ $route == normal ]]; then
+          sed -i "/^LABEL arch$/,/^LABEL /s/systemd.unit=multi-user.target/xsystemd.unit=multi-user.target/" "$file"
+        else
+          sed -i "/^LABEL blade-qemu-test$/,/^LABEL /s/blade.test=1/xblade.test=1/" "$file"
+        fi
+        set +e
+        verify_boot_entries >/dev/null 2>&1
+        verify_status=$?
+        set -e
+        mv "$file.clean" "$file"
+        [[ $verify_status -ne 0 ]] || exit 1
+      done
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
