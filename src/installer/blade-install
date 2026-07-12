@@ -24,7 +24,9 @@ source "$_blade_lib_dir/identity.sh"
 source "$_blade_lib_dir/install.sh"
 unset _blade_script_dir _blade_lib_dir
 
-TARGET_MOUNT=${TARGET_MOUNT:-/mnt}
+_requested_target_mount=${TARGET_MOUNT:-/mnt}
+_set_canonical_target_mount "$_requested_target_mount"
+unset _requested_target_mount
 PAYLOAD_PATH=${PAYLOAD_PATH:-/usr/share/blade-installer/rootfs.tar.zst}
 PAYLOAD_CHECKSUM_PATH=${PAYLOAD_CHECKSUM_PATH:-$PAYLOAD_PATH.sha256}
 LIVE_INSTALL_LOG=${LIVE_INSTALL_LOG:-/var/log/blade-arch-installer.log}

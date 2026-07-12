@@ -270,6 +270,104 @@ EOF
   grep -Fx 'wipefs --all -- /dev/nvme0n1' "$COMMAND_LOG"
 }
 
+@test "target mount canonicalization rejects root aliases and resolver failures" {
+  make_fake_block_tools
+  WIPE_CONFIRMATION=WIPE
+  assert_safe_target() { printf 'guard %s\n' "$1" >>"$COMMAND_LOG"; }
+
+  TARGET_MOUNT=/mnt/..
+  run partition_target /dev/nvme0n1
+  [ "$status" -ne 0 ]
+  [ ! -e "$COMMAND_LOG" ]
+
+  TARGET_MOUNT=relative/target
+  run partition_target /dev/nvme0n1
+  [ "$status" -ne 0 ]
+  [ ! -e "$COMMAND_LOG" ]
+
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/safe-target"
+  REALPATH_BIN=/bin/false
+  run partition_target /dev/nvme0n1
+  [ "$status" -ne 0 ]
+  [ ! -e "$COMMAND_LOG" ]
+}
+
+@test "a symlink alias resolving to an active mount is rejected" {
+  local mounted_path="$BATS_TEST_TMPDIR/mounted"
+  local alias_path="$BATS_TEST_TMPDIR/alias"
+  mkdir -p "$mounted_path"
+  ln -s "$mounted_path" "$alias_path"
+  make_fake_block_tools
+  TARGET_MOUNT=$alias_path
+  WIPE_CONFIRMATION=WIPE
+  FAKE_MOUNT_TARGETS=$mounted_path
+  export FAKE_MOUNT_TARGETS
+  assert_safe_target() { printf 'guard %s\n' "$1" >>"$COMMAND_LOG"; }
+
+  run partition_target /dev/nvme0n1
+  [ "$status" -ne 0 ]
+  [ "$(<"$COMMAND_LOG")" = 'findmnt --raw --noheadings --output TARGET' ]
+}
+
+@test "a dot-dot alias resolving to an active mount is rejected" {
+  local mounted_path="$BATS_TEST_TMPDIR/mounted"
+  mkdir -p "$BATS_TEST_TMPDIR/base" "$mounted_path"
+  make_fake_block_tools
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/base/../mounted"
+  WIPE_CONFIRMATION=WIPE
+  FAKE_MOUNT_TARGETS=$mounted_path
+  export FAKE_MOUNT_TARGETS
+  assert_safe_target() { printf 'guard %s\n' "$1" >>"$COMMAND_LOG"; }
+
+  run partition_target /dev/nvme0n1
+  [ "$status" -ne 0 ]
+  [ "$(<"$COMMAND_LOG")" = 'findmnt --raw --noheadings --output TARGET' ]
+}
+
+@test "a safe nonexisting target is canonicalized and used consistently" {
+  local canonical_path="$BATS_TEST_TMPDIR/safe-target"
+  mkdir -p "$BATS_TEST_TMPDIR/base"
+  make_fake_block_tools
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/base/../safe-target"
+  WIPE_CONFIRMATION=WIPE
+  assert_safe_target() { printf 'guard %s\n' "$1" >>"$COMMAND_LOG"; }
+
+  partition_target /dev/nvme0n1
+
+  [ "$TARGET_MOUNT" = "$canonical_path" ]
+  [ -d "$canonical_path/boot" ]
+  grep -Fx "mount -- /dev/nvme0n1p2 $canonical_path" "$COMMAND_LOG"
+  grep -Fx "mount -- /dev/nvme0n1p1 $canonical_path/boot" "$COMMAND_LOG"
+}
+
+@test "partitioning reuses an authoritative canonical target without resolving it again" {
+  local real_realpath
+  local fake_realpath="$BATS_TEST_TMPDIR/realpath"
+  local realpath_log="$BATS_TEST_TMPDIR/realpath.log"
+  real_realpath=$(command -v realpath)
+  cat >"$fake_realpath" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'realpath %s\n' "$*" >>"$REALPATH_LOG"
+exec "$REAL_REALPATH" "$@"
+SCRIPT
+  chmod +x "$fake_realpath"
+  make_fake_block_tools
+  mkdir -p "$BATS_TEST_TMPDIR/base"
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/base/../canonical-target"
+  WIPE_CONFIRMATION=WIPE
+  REALPATH_BIN=$fake_realpath
+  REALPATH_LOG=$realpath_log
+  REAL_REALPATH=$real_realpath
+  export REALPATH_LOG REAL_REALPATH
+  assert_safe_target() { printf 'guard %s\n' "$1" >>"$COMMAND_LOG"; }
+
+  _set_canonical_target_mount "$TARGET_MOUNT"
+  partition_target /dev/nvme0n1
+
+  [ "$(wc -l <"$realpath_log")" -eq 1 ]
+  [ "$TARGET_MOUNT" = "$BATS_TEST_TMPDIR/canonical-target" ]
+}
+
 @test "test-mode environment alone never bypasses the target guard" {
   make_fake_block_tools
   TARGET_MOUNT="$BATS_TEST_TMPDIR/mnt"

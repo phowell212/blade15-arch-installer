@@ -13,6 +13,7 @@ if [[ -r "$_build_env_file" ]]; then
   source "$_build_env_file"
 fi
 DEFAULT_TARGET_CONFIG_SOURCE="$_install_lib_dir/../../target-rootfs"
+_CANONICAL_TARGET_MOUNT=''
 unset _install_lib_dir _build_env_file
 
 : "${DEFAULT_TIMEZONE:?DEFAULT_TIMEZONE is required}"
@@ -28,6 +29,31 @@ _partition_path() {
   else
     printf '%s%s\n' "$device" "$number"
   fi
+}
+
+canonicalize_target_mount() {
+  local requested=${1-}
+  local canonical
+
+  [[ "$requested" == /* ]] || return 1
+  if ! canonical=$("${REALPATH_BIN:-realpath}" \
+    --canonicalize-missing -- "$requested"); then
+    return 1
+  fi
+  [[ "$canonical" == /* && "$canonical" != / ]] || return 1
+  printf '%s\n' "$canonical"
+}
+
+_set_canonical_target_mount() {
+  local requested=${1-}
+  local canonical
+
+  if ! canonical=$(canonicalize_target_mount "$requested"); then
+    die "Target mount path must canonicalize to an absolute non-root path"
+  fi
+  TARGET_MOUNT=$canonical
+  _CANONICAL_TARGET_MOUNT=$canonical
+  export TARGET_MOUNT
 }
 
 _target_mounts_in_use() {
@@ -60,7 +86,7 @@ _target_mounts_in_use() {
 
 partition_target() {
   local device=${1-}
-  local target_mount=${TARGET_MOUNT:-/mnt}
+  local target_mount
   local boot_partition
   local root_partition
 
@@ -70,6 +96,13 @@ partition_target() {
 
   boot_partition=$(_partition_path "$device" 1)
   root_partition=$(_partition_path "$device" 2)
+  if [[ -z "$_CANONICAL_TARGET_MOUNT" ]]; then
+    _set_canonical_target_mount "${TARGET_MOUNT:-/mnt}"
+  else
+    TARGET_MOUNT=$_CANONICAL_TARGET_MOUNT
+    export TARGET_MOUNT
+  fi
+  target_mount=$_CANONICAL_TARGET_MOUNT
   if _target_mounts_in_use "$target_mount"; then
     die "Target mount path is already in use: $target_mount"
   fi

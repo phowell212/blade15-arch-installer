@@ -33,6 +33,51 @@ teardown() {
   [ "$(<"$trace")" = $'preflight\nselect\nidentity\nsummary\nwipe\npartition\nextract\nconfigure\nvalidate\nsync-unmount\nfinish' ]
 }
 
+@test "orchestrator canonicalizes one target mount for partition through cleanup" {
+  local trace="$BATS_TEST_TMPDIR/target-mounts"
+  local canonical_mount="$BATS_TEST_TMPDIR/canonical-target"
+  local requested_mount="$BATS_TEST_TMPDIR/base/../canonical-target"
+  mkdir -p "$BATS_TEST_TMPDIR/base"
+
+  run env PHASE_TRACE="$trace" TARGET_MOUNT="$requested_mount" bash -c '
+    source "$1"
+    record_mount() { printf "%s|%s\n" "$1" "$TARGET_MOUNT" >>"$PHASE_TRACE"; }
+    _phase_preflight() { :; }
+    _phase_select() { :; }
+    _phase_identity() { :; }
+    _phase_summary() { :; }
+    _phase_wipe() { :; }
+    _phase_partition() { record_mount partition; }
+    _phase_extract() { record_mount extract; }
+    _phase_configure() { record_mount configure; }
+    _phase_validate() { record_mount validate; }
+    _phase_sync_unmount() { record_mount cleanup; }
+    _phase_finish() { :; }
+    main
+  ' _ "$REPO_ROOT/src/installer/blade-install"
+  [ "$status" -eq 0 ]
+  [ "$(<"$trace")" = "partition|$canonical_mount
+extract|$canonical_mount
+configure|$canonical_mount
+validate|$canonical_mount
+cleanup|$canonical_mount" ]
+}
+
+@test "orchestrator rejects noncanonicalizable nonabsolute and root target mounts" {
+  local requested_mount
+
+  for requested_mount in relative/target /mnt/.. "$BATS_TEST_TMPDIR/failing-resolver"; do
+    if [[ "$requested_mount" == "$BATS_TEST_TMPDIR/failing-resolver" ]]; then
+      run env TARGET_MOUNT="$requested_mount" REALPATH_BIN=/bin/false \
+        bash -c 'source "$1"' _ "$REPO_ROOT/src/installer/blade-install"
+    else
+      run env TARGET_MOUNT="$requested_mount" \
+        bash -c 'source "$1"' _ "$REPO_ROOT/src/installer/blade-install"
+    fi
+    [ "$status" -ne 0 ]
+  done
+}
+
 @test "failure handler syncs reports the phase and exits without a non-tty shell" {
   local fake_sync="$BATS_TEST_TMPDIR/sync"
   local sync_log="$BATS_TEST_TMPDIR/sync.log"
