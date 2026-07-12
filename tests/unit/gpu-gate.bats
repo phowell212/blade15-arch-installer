@@ -65,12 +65,32 @@ make_fake_commands() {
 
   FAKE_BIN="$BATS_TEST_TMPDIR/fake-bin"
   COMMAND_LOG="$BATS_TEST_TMPDIR/commands"
-  mkdir -p "$FAKE_BIN"
+  SYSTEMD_ETC="$BATS_TEST_TMPDIR/systemd/etc/systemd/system"
+  SYSTEMD_UNIT_DIR="$BATS_TEST_TMPDIR/systemd/usr/lib/systemd/system"
+  mkdir -p "$FAKE_BIN" "$SYSTEMD_ETC/multi-user.target.wants" \
+    "$SYSTEMD_ETC/graphical.target.wants" "$SYSTEMD_UNIT_DIR"
+  touch "$SYSTEMD_UNIT_DIR/multi-user.target" \
+    "$SYSTEMD_UNIT_DIR/graphical.target" \
+    "$SYSTEMD_UNIT_DIR/gdm.service" \
+    "$SYSTEMD_UNIT_DIR/blade-firstboot-gpu.service"
+  ln -s "$SYSTEMD_UNIT_DIR/multi-user.target" "$SYSTEMD_ETC/default.target"
+  ln -s "$SYSTEMD_UNIT_DIR/blade-firstboot-gpu.service" \
+    "$SYSTEMD_ETC/multi-user.target.wants/blade-firstboot-gpu.service"
   cat >"$FAKE_BIN/tool" <<'SCRIPT'
 #!/usr/bin/env bash
 set -eu
 tool=${0##*/}
 printf '%s %s\n' "$tool" "$*" >>"$COMMAND_LOG"
+
+command_should_fail() {
+  local candidate
+
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" && "$*" == "$candidate" ]] && return 0
+  done <<<"${FAIL_SYSTEMCTL_COMMANDS:-}"
+  return 1
+}
+
 case "$tool" in
   timeout)
     command_name=${2##*/}
@@ -79,10 +99,73 @@ case "$tool" in
       switcherooctl) exit "${SWITCHEROOCTL_STATUS:-0}" ;;
     esac
     ;;
+  systemctl)
+    command_should_fail "$@" && exit 1
+    case "${1-}" in
+      enable)
+        case "${2-}" in
+          gdm.service)
+            ln -sfn "$SYSTEMD_UNIT_DIR/gdm.service" \
+              "$SYSTEMD_ETC/display-manager.service"
+            ;;
+          blade-firstboot-gpu.service)
+            ln -sfn "$SYSTEMD_UNIT_DIR/blade-firstboot-gpu.service" \
+              "$SYSTEMD_ETC/multi-user.target.wants/blade-firstboot-gpu.service"
+            ;;
+        esac
+        ;;
+      disable)
+        case "${2-}" in
+          gdm.service)
+            rm -f -- "$SYSTEMD_ETC/display-manager.service" \
+              "$SYSTEMD_ETC/graphical.target.wants/gdm.service"
+            ;;
+          blade-firstboot-gpu.service)
+            rm -f -- \
+              "$SYSTEMD_ETC/multi-user.target.wants/blade-firstboot-gpu.service"
+            ;;
+        esac
+        ;;
+      set-default)
+        ln -sfn "$SYSTEMD_UNIT_DIR/${2-}" "$SYSTEMD_ETC/default.target"
+        ;;
+      get-default)
+        target=$(readlink "$SYSTEMD_ETC/default.target")
+        printf '%s\n' "${target##*/}"
+        ;;
+      is-enabled)
+        case "${2-}" in
+          gdm.service)
+            if [[ -L "$SYSTEMD_ETC/display-manager.service" ||
+              -L "$SYSTEMD_ETC/graphical.target.wants/gdm.service" ]]; then
+              printf 'enabled\n'
+              exit 0
+            fi
+            ;;
+          blade-firstboot-gpu.service)
+            if [[ -L "$SYSTEMD_ETC/multi-user.target.wants/blade-firstboot-gpu.service" ]]; then
+              printf 'enabled\n'
+              exit 0
+            fi
+            ;;
+        esac
+        printf 'disabled\n'
+        exit 1
+        ;;
+    esac
+    ;;
+  mv)
+    destination=${!#}
+    [[ -n "${FAIL_MV_DEST:-}" && "$destination" == "$FAIL_MV_DEST" ]] && exit 1
+    /bin/mv "$@"
+    ;;
+  reboot)
+    exit "${REBOOT_STATUS:-0}"
+    ;;
 esac
 SCRIPT
   chmod +x "$FAKE_BIN/tool"
-  for tool in modprobe timeout systemctl reboot; do
+  for tool in modprobe timeout systemctl reboot mv; do
     ln -s tool "$FAKE_BIN/$tool"
   done
 
@@ -92,8 +175,52 @@ SCRIPT
   SWITCHEROOCTL_BIN=switcherooctl
   SYSTEMCTL_BIN="$FAKE_BIN/systemctl"
   REBOOT_BIN="$FAKE_BIN/reboot"
+  MV_BIN="$FAKE_BIN/mv"
   export COMMAND_LOG MODPROBE_BIN TIMEOUT_BIN NVIDIA_SMI_BIN
-  export SWITCHEROOCTL_BIN SYSTEMCTL_BIN REBOOT_BIN
+  export SWITCHEROOCTL_BIN SYSTEMCTL_BIN REBOOT_BIN MV_BIN
+  export SYSTEMD_ETC SYSTEMD_UNIT_DIR
+}
+
+setup_wrapper_state() {
+  SUCCESS_MARKER="$BATS_TEST_TMPDIR/state/gpu-gate-passed"
+  FAILURE_MARKER="$BATS_TEST_TMPDIR/state/gpu-gate-failed"
+  GPU_LOG="$BATS_TEST_TMPDIR/blade-gpu-firstboot.log"
+  GPU_TTY="$BATS_TEST_TMPDIR/tty1"
+  GPU_GATE_MARKER=$SUCCESS_MARKER
+  GPU_GATE_SUCCESS_MARKER=$SUCCESS_MARKER
+  GPU_GATE_FAILURE_MARKER=$FAILURE_MARKER
+  GPU_GATE_LOG=$GPU_LOG
+  TTY_PATH=$GPU_TTY
+  export GPU_GATE_MARKER GPU_GATE_SUCCESS_MARKER GPU_GATE_FAILURE_MARKER
+  export GPU_GATE_LOG TTY_PATH
+}
+
+run_gpu_exec() {
+  env GPU_LIB="$GPU_LIB" \
+    FAIL_SYSTEMCTL_COMMANDS="${FAIL_SYSTEMCTL_COMMANDS:-}" \
+    FAIL_MV_DEST="${FAIL_MV_DEST:-}" \
+    "$GPU_EXEC"
+}
+
+assert_failed_terminal_state() {
+  local default_target
+
+  [ -f "$FAILURE_MARKER" ]
+  [ ! -e "$SUCCESS_MARKER" ]
+  default_target=$(readlink "$SYSTEMD_ETC/default.target")
+  [ "${default_target##*/}" = multi-user.target ]
+  [ ! -L "$SYSTEMD_ETC/display-manager.service" ]
+  [ ! -L "$SYSTEMD_ETC/graphical.target.wants/gdm.service" ]
+  [ ! -L "$SYSTEMD_ETC/multi-user.target.wants/blade-firstboot-gpu.service" ]
+  ! grep -Eq '^systemctl enable blade-firstboot-gpu\.service|^reboot ' "$COMMAND_LOG"
+}
+
+assert_manual_recovery_instructions() {
+  grep -Fq "sudo rm -f -- $FAILURE_MARKER" "$GPU_TTY"
+  grep -Fq 'sudo systemctl set-default multi-user.target' "$GPU_TTY"
+  grep -Fq 'sudo systemctl disable gdm.service' "$GPU_TTY"
+  grep -Fq 'sudo systemctl enable blade-firstboot-gpu.service' "$GPU_TTY"
+  grep -Fq 'sudo systemctl start blade-firstboot-gpu.service' "$GPU_TTY"
 }
 
 assert_gate_commands() {
@@ -157,58 +284,168 @@ assert_gate_commands() {
 }
 
 @test "failed one-shot writes diagnostics without enabling GDM or rebooting" {
-  local marker="$BATS_TEST_TMPDIR/state/gpu-gate-passed"
-  local log="$BATS_TEST_TMPDIR/blade-gpu-firstboot.log"
-  local tty="$BATS_TEST_TMPDIR/tty1"
+  local containment_line
+  local marker_line
 
   materialize_gpu_fixture missing-nvidia-drm
   make_fake_commands
-  run env GPU_LIB="$GPU_LIB" GPU_GATE_MARKER="$marker" \
-    GPU_GATE_LOG="$log" TTY_PATH="$tty" "$GPU_EXEC"
+  setup_wrapper_state
+  run run_gpu_exec
 
   [ "$status" -ne 0 ]
-  [ ! -e "$marker" ]
-  grep -Fx 'systemctl disable blade-firstboot-gpu.service' "$COMMAND_LOG"
-  ! grep -Eq '^systemctl (enable gdm|set-default)|^reboot ' "$COMMAND_LOG"
-  grep -Fx 'GPU gate failed: required module not loaded: nvidia_drm' "$log"
-  grep -Fq 'Diagnostics:' "$tty"
-  grep -Fq 'Intel-only recovery' "$tty"
+  assert_failed_terminal_state
+  grep -Fx 'GPU gate failed: required module not loaded: nvidia_drm' "$GPU_LOG"
+  assert_manual_recovery_instructions
+  marker_line=$(grep -nF " $FAILURE_MARKER" "$COMMAND_LOG" | head -n1 | cut -d: -f1)
+  containment_line=$(grep -nF 'systemctl set-default multi-user.target' \
+    "$COMMAND_LOG" | head -n1 | cut -d: -f1)
+  [ -n "$marker_line" ]
+  [ -n "$containment_line" ]
+  [ "$marker_line" -lt "$containment_line" ]
 }
 
 @test "successful one-shot enables GDM and requests exactly one reboot" {
-  local marker="$BATS_TEST_TMPDIR/state/gpu-gate-passed"
-  local log="$BATS_TEST_TMPDIR/blade-gpu-firstboot.log"
-  local tty="$BATS_TEST_TMPDIR/tty1"
+  local default_target
+  local marker_line
+  local reboot_line
+  local verify_line
 
   materialize_gpu_fixture intel-panel
   make_fake_commands
-  run env GPU_LIB="$GPU_LIB" GPU_GATE_MARKER="$marker" \
-    GPU_GATE_LOG="$log" TTY_PATH="$tty" "$GPU_EXEC"
+  setup_wrapper_state
+  run run_gpu_exec
 
   [ "$status" -eq 0 ]
-  [ -f "$marker" ]
+  [ -f "$SUCCESS_MARKER" ]
+  [ ! -e "$FAILURE_MARKER" ]
+  default_target=$(readlink "$SYSTEMD_ETC/default.target")
+  [ "${default_target##*/}" = graphical.target ]
+  [ -L "$SYSTEMD_ETC/display-manager.service" ]
+  [ ! -L "$SYSTEMD_ETC/multi-user.target.wants/blade-firstboot-gpu.service" ]
   grep -Fx 'systemctl enable gdm.service' "$COMMAND_LOG"
   grep -Fx 'systemctl set-default graphical.target' "$COMMAND_LOG"
   grep -Fx 'systemctl disable blade-firstboot-gpu.service' "$COMMAND_LOG"
   [ "$(grep -c '^reboot $' "$COMMAND_LOG")" -eq 1 ]
+  marker_line=$(grep -nF " $SUCCESS_MARKER" "$COMMAND_LOG" | tail -n1 | cut -d: -f1)
+  verify_line=$(grep -nF 'systemctl get-default' "$COMMAND_LOG" | tail -n1 | cut -d: -f1)
+  reboot_line=$(grep -nF 'reboot ' "$COMMAND_LOG" | tail -n1 | cut -d: -f1)
+  [ -n "$marker_line" ]
+  [ -n "$verify_line" ]
+  [ -n "$reboot_line" ]
+  [ "$marker_line" -lt "$verify_line" ]
+  [ "$verify_line" -lt "$reboot_line" ]
 }
 
 @test "unwritable success marker fails before enabling GDM or rebooting" {
   local marker_parent="$BATS_TEST_TMPDIR/not-a-directory"
   local marker="$marker_parent/gpu-gate-passed"
-  local log="$BATS_TEST_TMPDIR/blade-gpu-firstboot.log"
-  local tty="$BATS_TEST_TMPDIR/tty1"
 
   materialize_gpu_fixture intel-panel
   make_fake_commands
+  setup_wrapper_state
+  SUCCESS_MARKER=$marker
+  GPU_GATE_MARKER=$marker
+  GPU_GATE_SUCCESS_MARKER=$marker
+  export GPU_GATE_MARKER GPU_GATE_SUCCESS_MARKER
   printf 'blocked\n' >"$marker_parent"
-  run env GPU_LIB="$GPU_LIB" GPU_GATE_MARKER="$marker" \
-    GPU_GATE_LOG="$log" TTY_PATH="$tty" "$GPU_EXEC"
+  run run_gpu_exec
 
   [ "$status" -ne 0 ]
-  [ ! -e "$marker" ]
-  ! grep -Eq '^systemctl (enable gdm|set-default graphical)|^reboot ' "$COMMAND_LOG"
-  grep -Fx 'GPU gate failed: unable to prepare success marker' "$log"
+  assert_failed_terminal_state
+  ! grep -Eq '^systemctl (enable gdm|set-default graphical)' "$COMMAND_LOG"
+  grep -Fx 'GPU gate failed: unable to prepare success marker' "$GPU_LOG"
+}
+
+@test "GDM enable failure enters the persistent fail-closed terminal" {
+  materialize_gpu_fixture intel-panel
+  make_fake_commands
+  setup_wrapper_state
+  FAIL_SYSTEMCTL_COMMANDS='enable gdm.service'
+
+  run run_gpu_exec
+
+  [ "$status" -ne 0 ]
+  assert_failed_terminal_state
+}
+
+@test "graphical default failure enters the persistent fail-closed terminal" {
+  materialize_gpu_fixture intel-panel
+  make_fake_commands
+  setup_wrapper_state
+  FAIL_SYSTEMCTL_COMMANDS='set-default graphical.target'
+
+  run run_gpu_exec
+
+  [ "$status" -ne 0 ]
+  assert_failed_terminal_state
+}
+
+@test "gate disable failure uses direct cleanup and cannot retry" {
+  materialize_gpu_fixture intel-panel
+  make_fake_commands
+  setup_wrapper_state
+  FAIL_SYSTEMCTL_COMMANDS='disable blade-firstboot-gpu.service'
+
+  run run_gpu_exec
+
+  [ "$status" -ne 0 ]
+  assert_failed_terminal_state
+  grep -Fq 'Containment command failed: disable blade-firstboot-gpu.service' "$GPU_LOG"
+  grep -Fq 'Containment fallback removed gate enablement symlink' "$GPU_LOG"
+}
+
+@test "GDM disable failure uses direct cleanup and remains fail-closed" {
+  materialize_gpu_fixture intel-panel
+  make_fake_commands
+  setup_wrapper_state
+  FAIL_SYSTEMCTL_COMMANDS=$'set-default graphical.target\ndisable gdm.service'
+
+  run run_gpu_exec
+
+  [ "$status" -ne 0 ]
+  assert_failed_terminal_state
+  grep -Fq 'Containment command failed: disable gdm.service' "$GPU_LOG"
+  grep -Fq 'Containment fallback removed GDM enablement symlink' "$GPU_LOG"
+}
+
+@test "success marker publication failure rolls back without reboot" {
+  materialize_gpu_fixture intel-panel
+  make_fake_commands
+  setup_wrapper_state
+  FAIL_MV_DEST=$SUCCESS_MARKER
+
+  run run_gpu_exec
+
+  [ "$status" -ne 0 ]
+  assert_failed_terminal_state
+  grep -Fq 'GPU gate failed: unable to publish success marker' "$GPU_LOG"
+}
+
+@test "rollback set-default failure uses a direct multi-user fallback" {
+  materialize_gpu_fixture intel-panel
+  make_fake_commands
+  setup_wrapper_state
+  FAIL_SYSTEMCTL_COMMANDS=$'disable blade-firstboot-gpu.service\nset-default multi-user.target'
+
+  run run_gpu_exec
+
+  [ "$status" -ne 0 ]
+  assert_failed_terminal_state
+  grep -Fq 'Containment command failed: set-default multi-user.target' "$GPU_LOG"
+  grep -Fq 'Containment fallback set default.target to multi-user.target' "$GPU_LOG"
+}
+
+@test "success-state verification failure rolls back without reboot" {
+  materialize_gpu_fixture intel-panel
+  make_fake_commands
+  setup_wrapper_state
+  FAIL_SYSTEMCTL_COMMANDS='get-default'
+
+  run run_gpu_exec
+
+  [ "$status" -ne 0 ]
+  assert_failed_terminal_state
+  grep -Fq 'GPU gate failed: success state verification failed' "$GPU_LOG"
 }
 
 @test "service starts from multi-user without a dependency cycle or retry loop" {
@@ -216,9 +453,12 @@ assert_gate_commands() {
 
   grep -Fx 'Type=oneshot' "$service"
   grep -Fx 'ExecStart=/usr/local/sbin/blade-firstboot-gpu' "$service"
+  grep -Fx 'ConditionPathExists=!/var/lib/blade-installer/gpu-gate-passed' "$service"
+  grep -Fx 'ConditionPathExists=!/var/lib/blade-installer/gpu-gate-failed' "$service"
   grep -Fx 'WantedBy=multi-user.target' "$service"
   ! grep -Eq '^After=.*multi-user\.target' "$service"
   ! grep -Eq '^Restart=' "$service"
+  ! grep -Fq '|| true' "$GPU_EXEC"
 }
 
 @test "shared installed-system configuration remains exact" {
@@ -228,4 +468,10 @@ assert_gate_commands() {
   [ "$(<"$target/modprobe.d/nvidia.conf")" = 'options nvidia_drm modeset=1 fbdev=1' ]
   [ "$(<"$target/mkinitcpio.conf.d/graphics.conf")" = 'MODULES=(i915)' ]
   [ "$(<"$target/sudoers.d/10-wheel")" = '%wheel ALL=(ALL:ALL) ALL' ]
+}
+
+@test "extensionless first-boot executable retains Unix line endings" {
+  grep -Fx \
+    'src/target-rootfs/usr/local/sbin/blade-firstboot-gpu text eol=lf' \
+    "$REPO_ROOT/.gitattributes"
 }

@@ -2,83 +2,291 @@
 set -u -o pipefail
 
 GPU_LIB=${GPU_LIB:-/usr/local/lib/blade-firstboot/gpu.sh}
-GPU_GATE_MARKER=${GPU_GATE_MARKER:-/var/lib/blade-installer/gpu-gate-passed}
+GPU_GATE_SUCCESS_MARKER=${GPU_GATE_SUCCESS_MARKER:-${GPU_GATE_MARKER:-/var/lib/blade-installer/gpu-gate-passed}}
+GPU_GATE_FAILURE_MARKER=${GPU_GATE_FAILURE_MARKER:-/var/lib/blade-installer/gpu-gate-failed}
 GPU_GATE_LOG=${GPU_GATE_LOG:-/var/log/blade-gpu-firstboot.log}
 TTY_PATH=${TTY_PATH:-/dev/tty1}
 SYSTEMCTL_BIN=${SYSTEMCTL_BIN:-systemctl}
 REBOOT_BIN=${REBOOT_BIN:-reboot}
-marker_tmp=${GPU_GATE_MARKER}.tmp.$$
+MV_BIN=${MV_BIN:-mv}
+RM_BIN=${RM_BIN:-rm}
+LN_BIN=${LN_BIN:-ln}
+READLINK_BIN=${READLINK_BIN:-readlink}
+SYSTEMD_ETC=${SYSTEMD_ETC:-/etc/systemd/system}
+SYSTEMD_UNIT_DIR=${SYSTEMD_UNIT_DIR:-/usr/lib/systemd/system}
+success_tmp=${GPU_GATE_SUCCESS_MARKER}.tmp.$$
 
 # shellcheck source=/dev/null
 source "$GPU_LIB"
 
-write_recovery_instructions() {
-  {
-    printf 'Blade GPU validation failed; GNOME remains disabled.\n'
-    printf 'Diagnostics: %s\n' "$GPU_GATE_LOG"
-    printf 'Review with: journalctl -u blade-firstboot-gpu.service\n'
-    printf 'Boot the Intel-only recovery or text recovery entry if needed.\n'
-    printf 'After repairs: sudo systemctl start blade-firstboot-gpu.service\n'
-  } >"$TTY_PATH" 2>/dev/null || true
+log_line() {
+  printf '%s\n' "$1" >>"$GPU_GATE_LOG"
 }
 
-prevent_automatic_retry() {
-  if ! "$SYSTEMCTL_BIN" disable blade-firstboot-gpu.service >>"$GPU_GATE_LOG" 2>&1; then
-    printf 'Warning: unable to disable automatic GPU gate retry\n' >>"$GPU_GATE_LOG"
+write_recovery_instructions() {
+  if ! {
+    printf 'Blade GPU validation failed; GNOME remains disabled.\n'
+    printf 'Diagnostics: %s\n' "$GPU_GATE_LOG"
+    printf 'Boot the Intel-only recovery or text recovery entry if needed.\n'
+    printf 'The failure state is persistent and will not retry automatically.\n'
+    printf 'Only when you choose to retry, run these commands:\n'
+    printf 'sudo rm -f -- %s\n' "$GPU_GATE_FAILURE_MARKER"
+    printf 'sudo systemctl set-default multi-user.target\n'
+    printf 'sudo systemctl disable gdm.service\n'
+    printf 'sudo systemctl enable blade-firstboot-gpu.service\n'
+    printf 'sudo systemctl start blade-firstboot-gpu.service\n'
+  } >"$TTY_PATH" 2>/dev/null; then
+    log_line 'Warning: unable to write recovery instructions to tty1'
   fi
 }
 
-mkdir -p -- "${GPU_GATE_LOG%/*}"
-printf 'Blade first-boot GPU gate\n' >"$GPU_GATE_LOG"
+atomic_publish_marker() {
+  local marker=$1
+  local value=$2
+  local marker_tmp=${marker}.tmp.$$
+
+  if ! mkdir -p -- "${marker%/*}"; then
+    return 1
+  fi
+  if ! printf '%s\n' "$value" >"$marker_tmp"; then
+    return 1
+  fi
+  if ! "$MV_BIN" -f -- "$marker_tmp" "$marker"; then
+    return 1
+  fi
+}
+
+safe_remove_symlink() {
+  local path=$1
+
+  if [[ -L "$path" ]]; then
+    "$RM_BIN" -f -- "$path"
+    return $?
+  fi
+  [[ ! -e "$path" ]]
+}
+
+direct_set_multi_user_default() {
+  local default_link=$SYSTEMD_ETC/default.target
+
+  if [[ -L "$default_link" ]]; then
+    if ! "$RM_BIN" -f -- "$default_link"; then
+      return 1
+    fi
+  elif [[ -e "$default_link" ]]; then
+    return 1
+  fi
+  "$LN_BIN" -s -- "$SYSTEMD_UNIT_DIR/multi-user.target" "$default_link"
+}
+
+direct_disable_gdm() {
+  local failed=0
+  local path
+
+  for path in \
+    "$SYSTEMD_ETC/display-manager.service" \
+    "$SYSTEMD_ETC/graphical.target.wants/gdm.service"; do
+    if ! safe_remove_symlink "$path"; then
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+direct_disable_gate() {
+  safe_remove_symlink \
+    "$SYSTEMD_ETC/multi-user.target.wants/blade-firstboot-gpu.service"
+}
+
+verify_contained_state() {
+  local default_target
+  local failed=0
+
+  if [[ ! -f "$GPU_GATE_FAILURE_MARKER" ]]; then
+    log_line 'Containment verification failed: failure marker is absent'
+    failed=1
+  fi
+  if [[ ! -L "$SYSTEMD_ETC/default.target" ]]; then
+    log_line 'Containment verification failed: default.target is not a symlink'
+    failed=1
+  elif ! default_target=$("$READLINK_BIN" "$SYSTEMD_ETC/default.target"); then
+    log_line 'Containment verification failed: default.target is unreadable'
+    failed=1
+  elif [[ "${default_target##*/}" != multi-user.target ]]; then
+    log_line 'Containment verification failed: default target is not multi-user.target'
+    failed=1
+  fi
+  if [[ -L "$SYSTEMD_ETC/display-manager.service" ||
+    -L "$SYSTEMD_ETC/graphical.target.wants/gdm.service" ]]; then
+    log_line 'Containment verification failed: GDM remains enabled'
+    failed=1
+  fi
+  if [[ -L "$SYSTEMD_ETC/multi-user.target.wants/blade-firstboot-gpu.service" ]]; then
+    log_line 'Containment verification failed: GPU gate remains enabled'
+    failed=1
+  fi
+  return "$failed"
+}
+
+contain_failure() {
+  local reason=$1
+  local failures=0
+
+  log_line "Entering persistent fail-closed state: $reason"
+
+  # The persistent failure marker is always published before containment actions.
+  if atomic_publish_marker "$GPU_GATE_FAILURE_MARKER" "$reason"; then
+    log_line 'Published persistent GPU failure marker'
+  else
+    log_line 'Containment failure: unable to publish persistent failure marker'
+    failures=$((failures + 1))
+  fi
+
+  if [[ -e "$GPU_GATE_SUCCESS_MARKER" || -L "$GPU_GATE_SUCCESS_MARKER" ]]; then
+    if ! "$RM_BIN" -f -- "$GPU_GATE_SUCCESS_MARKER"; then
+      log_line 'Containment failure: unable to remove success marker'
+      failures=$((failures + 1))
+    fi
+  fi
+  if [[ -e "$success_tmp" || -L "$success_tmp" ]]; then
+    if ! "$RM_BIN" -f -- "$success_tmp"; then
+      log_line 'Containment failure: unable to remove pending success marker'
+      failures=$((failures + 1))
+    fi
+  fi
+
+  if ! "$SYSTEMCTL_BIN" set-default multi-user.target >>"$GPU_GATE_LOG" 2>&1; then
+    log_line 'Containment command failed: set-default multi-user.target'
+    if direct_set_multi_user_default; then
+      log_line 'Containment fallback set default.target to multi-user.target'
+    else
+      log_line 'Containment fallback failed: default.target is not multi-user.target'
+      failures=$((failures + 1))
+    fi
+  fi
+
+  if ! "$SYSTEMCTL_BIN" disable gdm.service >>"$GPU_GATE_LOG" 2>&1; then
+    log_line 'Containment command failed: disable gdm.service'
+    if direct_disable_gdm; then
+      log_line 'Containment fallback removed GDM enablement symlink'
+    else
+      log_line 'Containment fallback failed: unable to remove GDM enablement symlink'
+      failures=$((failures + 1))
+    fi
+  fi
+
+  if ! "$SYSTEMCTL_BIN" disable blade-firstboot-gpu.service \
+    >>"$GPU_GATE_LOG" 2>&1; then
+    log_line 'Containment command failed: disable blade-firstboot-gpu.service'
+    if direct_disable_gate; then
+      log_line 'Containment fallback removed gate enablement symlink'
+    else
+      log_line 'Containment fallback failed: unable to remove gate enablement symlink'
+      failures=$((failures + 1))
+    fi
+  fi
+
+  if ! verify_contained_state; then
+    failures=$((failures + 1))
+  fi
+
+  if ((failures == 0)); then
+    log_line 'Persistent fail-closed state verified'
+  else
+    log_line "Persistent fail-closed containment completed with $failures failure(s)"
+  fi
+  write_recovery_instructions
+  return 1
+}
+
+verify_success_state() {
+  local default_target
+  local gate_state
+  local gate_status
+  local gdm_state
+
+  if ! default_target=$("$SYSTEMCTL_BIN" get-default 2>>"$GPU_GATE_LOG"); then
+    return 1
+  fi
+  [[ "$default_target" == graphical.target ]] || return 1
+
+  if ! gdm_state=$("$SYSTEMCTL_BIN" is-enabled gdm.service 2>>"$GPU_GATE_LOG"); then
+    return 1
+  fi
+  [[ "$gdm_state" == enabled ]] || return 1
+
+  gate_state=$("$SYSTEMCTL_BIN" is-enabled blade-firstboot-gpu.service \
+    2>>"$GPU_GATE_LOG")
+  gate_status=$?
+  [[ "$gate_status" -ne 0 && "$gate_state" == disabled ]] || return 1
+  [[ -f "$GPU_GATE_SUCCESS_MARKER" ]]
+}
+
+if ! mkdir -p -- "${GPU_GATE_LOG%/*}"; then
+  printf 'Unable to create GPU gate log directory\n' >&2
+  exit 1
+fi
+if ! printf 'Blade first-boot GPU gate\n' >"$GPU_GATE_LOG"; then
+  printf 'Unable to write GPU gate log\n' >&2
+  exit 1
+fi
+
+if [[ -e "$GPU_GATE_FAILURE_MARKER" ]]; then
+  log_line 'Persistent GPU failure marker already exists; refusing automatic retry'
+  write_recovery_instructions
+  exit 1
+fi
+if [[ -e "$GPU_GATE_SUCCESS_MARKER" ]]; then
+  log_line 'GPU success marker already exists; no transition required'
+  exit 0
+fi
 
 gpu_gate >>"$GPU_GATE_LOG" 2>&1
 gate_status=$?
 if ((gate_status != 0)); then
-  prevent_automatic_retry
-  write_recovery_instructions
-  printf 'GPU validation failed; see %s\n' "$GPU_GATE_LOG" >&2
-  exit "$gate_status"
+  contain_failure 'GPU validation failed'
+  exit 1
 fi
 
-if ! mkdir -p -- "${GPU_GATE_MARKER%/*}" 2>>"$GPU_GATE_LOG" ||
-  ! printf 'passed\n' >"$marker_tmp" 2>>"$GPU_GATE_LOG"; then
-  rm -f -- "$marker_tmp"
-  printf 'GPU gate failed: unable to prepare success marker\n' >>"$GPU_GATE_LOG"
-  prevent_automatic_retry
-  write_recovery_instructions
+if ! mkdir -p -- "${GPU_GATE_SUCCESS_MARKER%/*}" 2>>"$GPU_GATE_LOG" ||
+  ! printf 'passed\n' >"$success_tmp" 2>>"$GPU_GATE_LOG"; then
+  log_line 'GPU gate failed: unable to prepare success marker'
+  contain_failure 'unable to prepare success marker'
   exit 1
 fi
 
 if ! "$SYSTEMCTL_BIN" enable gdm.service >>"$GPU_GATE_LOG" 2>&1; then
-  rm -f -- "$marker_tmp"
-  printf 'GPU gate failed: unable to enable gdm.service\n' >>"$GPU_GATE_LOG"
-  prevent_automatic_retry
-  write_recovery_instructions
+  log_line 'GPU gate failed: unable to enable gdm.service'
+  contain_failure 'unable to enable gdm.service'
   exit 1
 fi
 if ! "$SYSTEMCTL_BIN" set-default graphical.target >>"$GPU_GATE_LOG" 2>&1; then
-  rm -f -- "$marker_tmp"
-  "$SYSTEMCTL_BIN" disable gdm.service >>"$GPU_GATE_LOG" 2>&1 || true
-  printf 'GPU gate failed: unable to set graphical.target as default\n' >>"$GPU_GATE_LOG"
-  prevent_automatic_retry
-  write_recovery_instructions
+  log_line 'GPU gate failed: unable to set graphical.target as default'
+  contain_failure 'unable to set graphical.target as default'
   exit 1
 fi
-if ! "$SYSTEMCTL_BIN" disable blade-firstboot-gpu.service >>"$GPU_GATE_LOG" 2>&1; then
-  rm -f -- "$marker_tmp"
-  "$SYSTEMCTL_BIN" set-default multi-user.target >>"$GPU_GATE_LOG" 2>&1 || true
-  "$SYSTEMCTL_BIN" disable gdm.service >>"$GPU_GATE_LOG" 2>&1 || true
-  printf 'GPU gate failed: unable to disable first-boot GPU gate\n' >>"$GPU_GATE_LOG"
-  write_recovery_instructions
+if ! "$SYSTEMCTL_BIN" disable blade-firstboot-gpu.service \
+  >>"$GPU_GATE_LOG" 2>&1; then
+  log_line 'GPU gate failed: unable to disable first-boot GPU gate'
+  contain_failure 'unable to disable first-boot GPU gate'
   exit 1
 fi
 
-if ! mv -f -- "$marker_tmp" "$GPU_GATE_MARKER" 2>>"$GPU_GATE_LOG"; then
-  "$SYSTEMCTL_BIN" enable blade-firstboot-gpu.service >>"$GPU_GATE_LOG" 2>&1 || true
-  "$SYSTEMCTL_BIN" set-default multi-user.target >>"$GPU_GATE_LOG" 2>&1 || true
-  "$SYSTEMCTL_BIN" disable gdm.service >>"$GPU_GATE_LOG" 2>&1 || true
-  printf 'GPU gate failed: unable to write success marker\n' >>"$GPU_GATE_LOG"
-  write_recovery_instructions
+if ! "$MV_BIN" -f -- "$success_tmp" "$GPU_GATE_SUCCESS_MARKER" \
+  >>"$GPU_GATE_LOG" 2>&1; then
+  log_line 'GPU gate failed: unable to publish success marker'
+  contain_failure 'unable to publish success marker'
   exit 1
 fi
-"$REBOOT_BIN"
+
+if ! verify_success_state; then
+  log_line 'GPU gate failed: success state verification failed'
+  contain_failure 'success state verification failed'
+  exit 1
+fi
+
+if ! "$REBOOT_BIN"; then
+  log_line 'GPU gate failed: reboot request failed'
+  contain_failure 'reboot request failed'
+  exit 1
+fi

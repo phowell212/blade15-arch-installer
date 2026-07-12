@@ -12,5 +12,6 @@
 *.fixture text eol=lf
 *.service text eol=lf
 src/installer/blade-install text eol=lf
+src/target-rootfs/usr/local/sbin/blade-firstboot-gpu text eol=lf
 src/target-rootfs/etc/sudoers.d/* text eol=lf
 Makefile text eol=lf
