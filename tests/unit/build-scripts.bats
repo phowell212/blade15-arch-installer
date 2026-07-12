@@ -7,7 +7,7 @@ setup() {
   VERIFY_ROOTFS="$REPO_ROOT/scripts/verify-rootfs.sh"
   PREPARE_ARCHISO="$REPO_ROOT/scripts/prepare-archiso.sh"
   BUILD_ISO="$REPO_ROOT/scripts/build-iso.sh"
-  VERIFY_ARTIFACTS="$REPO_ROOT/scripts/verify-artifacts.sh"
+  VERIFY_ARTIFACTS="${VERIFY_ARTIFACTS_OVERRIDE:-$REPO_ROOT/scripts/verify-artifacts.sh}"
   QEMU_EXPECT="$REPO_ROOT/tests/integration/qemu-boot.exp"
   QEMU_FAKE_CHILD="$REPO_ROOT/tests/fixtures/qemu-fake-child.sh"
 }
@@ -848,12 +848,25 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "untouched prepared boot profile passes artifact verification" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    verify_boot_entries
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
 @test "artifact boot verification rejects a missing rescue guard in every active config" {
   prepare_built_profile_fixture
 
   run bash -c '
     source "$1"
     ISO_TREE=$2
+    verify_boot_entries || exit $?
     files=(
       "$ISO_TREE/grub/grub.cfg:grub"
       "$ISO_TREE/grub/loopback.cfg:grub"
@@ -891,6 +904,7 @@ teardown() {
   run bash -c '
     source "$1"
     ISO_TREE=$2
+    verify_boot_entries || exit $?
     files=(
       "$ISO_TREE/grub/grub.cfg:grub"
       "$ISO_TREE/grub/loopback.cfg:grub"
@@ -930,6 +944,7 @@ teardown() {
   run bash -c '
     source "$1"
     ISO_TREE=$2
+    verify_boot_entries || exit $?
     files=(
       "$ISO_TREE/grub/grub.cfg:grub"
       "$ISO_TREE/grub/loopback.cfg:grub"
@@ -973,6 +988,7 @@ teardown() {
   run bash -c '
     source "$1"
     ISO_TREE=$2
+    verify_boot_entries || exit $?
     files=(
       "$ISO_TREE/grub/grub.cfg:grub"
       "$ISO_TREE/grub/loopback.cfg:grub"
@@ -1104,6 +1120,7 @@ teardown() {
   run bash -c '
     source "$1"
     ISO_TREE=$2
+    verify_boot_entries || exit $?
     files=(
       "$ISO_TREE/grub/grub.cfg:grub"
       "$ISO_TREE/grub/loopback.cfg:grub"
@@ -1140,6 +1157,7 @@ teardown() {
   run bash -c '
     source "$1"
     ISO_TREE=$2
+    verify_boot_entries || exit $?
     files=(
       "$ISO_TREE/grub/grub.cfg:grub"
       "$ISO_TREE/grub/loopback.cfg:grub"
@@ -1179,6 +1197,7 @@ teardown() {
   run bash -c '
     source "$1"
     ISO_TREE=$2
+    verify_boot_entries || exit $?
     files=(
       "$ISO_TREE/grub/grub.cfg:grub"
       "$ISO_TREE/grub/loopback.cfg:grub"
@@ -1213,6 +1232,7 @@ teardown() {
   run bash -c '
     source "$1"
     ISO_TREE=$2
+    verify_boot_entries || exit $?
     files=(
       "$ISO_TREE/grub/grub.cfg:grub"
       "$ISO_TREE/grub/loopback.cfg:grub"
