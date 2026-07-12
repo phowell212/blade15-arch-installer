@@ -30,6 +30,34 @@ _partition_path() {
   fi
 }
 
+_target_mounts_in_use() {
+  local target_mount=${1-}
+  local mount_targets
+  local mounted_path
+
+  [[ "$target_mount" == /* && "$target_mount" != / ]] ||
+    die "Target mount path must be an absolute non-root path"
+  while [[ "$target_mount" == */ ]]; do
+    target_mount=${target_mount%/}
+  done
+
+  if ! mount_targets=$("${FINDMNT_BIN:-findmnt}" \
+    --raw --noheadings --output TARGET); then
+    die "Unable to inspect active mountpoints"
+  fi
+  while IFS= read -r mounted_path; do
+    [[ -n "$mounted_path" ]] || continue
+    while [[ "$mounted_path" != / && "$mounted_path" == */ ]]; do
+      mounted_path=${mounted_path%/}
+    done
+    if [[ "$mounted_path" == "$target_mount" ||
+      "$mounted_path" == "$target_mount/"* ]]; then
+      return 0
+    fi
+  done <<<"$mount_targets"
+  return 1
+}
+
 partition_target() {
   local device=${1-}
   local target_mount=${TARGET_MOUNT:-/mnt}
@@ -37,16 +65,16 @@ partition_target() {
   local root_partition
 
   [[ -n "$device" ]] || die "Target disk is required"
-  assert_safe_target "$device" || die "Target disk failed the safety check"
   require_wipe_confirmation "${WIPE_CONFIRMATION:-}" ||
     die "Exact WIPE confirmation is required"
 
   boot_partition=$(_partition_path "$device" 1)
   root_partition=$(_partition_path "$device" 2)
-  if "${FINDMNT_BIN:-findmnt}" -rn --target "$target_mount" >/dev/null 2>&1; then
+  if _target_mounts_in_use "$target_mount"; then
     die "Target mount path is already in use: $target_mount"
   fi
 
+  assert_safe_target "$device" || die "Target disk failed the safety check"
   "${WIPEFS_BIN:-wipefs}" --all -- "$device"
   "${SGDISK_BIN:-sgdisk}" --zap-all "$device"
   "${SGDISK_BIN:-sgdisk}" -n 1:0:+1G -t 1:ef00 -c 1:EFI "$device"
@@ -62,27 +90,56 @@ partition_target() {
   "${MOUNT_BIN:-mount}" -- "$boot_partition" "$target_mount/boot"
 }
 
+_payload_checksum_digest() {
+  local checksum=${1-}
+  local line
+  local digest=''
+  local entry_count=0
+
+  [[ -r "$checksum" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    ((entry_count += 1))
+    ((entry_count == 1)) || return 1
+    if [[ "$line" =~ ^([[:xdigit:]]{64})([[:space:]]|$) ]]; then
+      digest=${BASH_REMATCH[1],,}
+    else
+      return 1
+    fi
+  done <"$checksum"
+
+  ((entry_count == 1)) || return 1
+  printf '%s\n' "$digest"
+}
+
 extract_target() {
   local device=${1-}
   local target_mount=${TARGET_MOUNT:-/mnt}
   local payload=${PAYLOAD_PATH:-/usr/share/blade-installer/rootfs.tar.zst}
   local checksum=${PAYLOAD_CHECKSUM_PATH:-$payload.sha256}
-  local payload_dir
-  local checksum_name
+  local expected_digest
+  local actual_output
+  local actual_digest
 
   [[ -n "$device" ]] || die "Target disk is required"
   [[ -r "$payload" ]] || die "Cannot read root filesystem payload: $payload"
   [[ -r "$checksum" ]] || die "Cannot read payload checksum: $checksum"
   [[ -d "$target_mount" ]] || die "Target root is not mounted"
 
-  payload_dir=$(cd -- "$(dirname -- "$checksum")" && pwd)
-  checksum_name=$(basename -- "$checksum")
-  if ! (
-    cd -- "$payload_dir"
-    "${SHA256SUM_BIN:-sha256sum}" --check "$checksum_name"
-  ); then
+  if ! expected_digest=$(_payload_checksum_digest "$checksum"); then
+    die "Payload checksum sidecar must contain exactly one 64-hex digest"
+  fi
+  if ! actual_output=$("${SHA256SUM_BIN:-sha256sum}" "$payload"); then
     die "Root filesystem payload checksum verification failed"
   fi
+  if [[ "$actual_output" =~ ^([[:xdigit:]]{64})([[:space:]]|$) ]]; then
+    actual_digest=${BASH_REMATCH[1],,}
+  else
+    die "Unable to parse the root filesystem payload digest"
+  fi
+  [[ "$actual_digest" == "$expected_digest" ]] ||
+    die "Root filesystem payload checksum verification failed"
+
   if ! "${ZSTD_BIN:-zstd}" -dc "$payload" |
     "${BSDTAR_BIN:-bsdtar}" --acls --xattrs --numeric-owner \
       -xpf - -C "$target_mount"; then

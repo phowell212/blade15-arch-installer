@@ -7,6 +7,7 @@ setup() {
   TARGET_CONFIG_SOURCE="$REPO_ROOT/src/target-rootfs"
   ROOT_UUID=11111111-2222-3333-4444-555555555555
   BOOT_UUID=AAAA-BBBB
+  REAL_SHA256SUM=$(command -v sha256sum)
   mkdir -p "$TARGET_ROOT"
 
   if [[ -f "$REPO_ROOT/src/installer/lib/install.sh" ]]; then
@@ -43,9 +44,17 @@ make_fake_block_tools() {
 set -eu
 tool=${0##*/}
 printf '%s %s\n' "$tool" "$*" >>"$COMMAND_LOG"
+if [[ "$tool" == findmnt ]]; then
+  if [[ " $* " == *' --target '* ]]; then
+    exit 1
+  fi
+  if [[ -n "${FAKE_MOUNT_TARGETS:-}" ]]; then
+    printf '%s\n' "$FAKE_MOUNT_TARGETS"
+  fi
+fi
 SCRIPT
   chmod +x "$FAKE_BIN/tool"
-  for tool in wipefs sgdisk partprobe udevadm mkfs.fat mkfs.ext4 mount; do
+  for tool in findmnt wipefs sgdisk partprobe udevadm mkfs.fat mkfs.ext4 mount; do
     ln -s tool "$FAKE_BIN/$tool"
   done
   export COMMAND_LOG
@@ -65,7 +74,13 @@ tool=${0##*/}
 case "$tool" in
   sha256sum)
     printf 'sha256sum %s\n' "$*" >>"$COMMAND_LOG"
-    exit "${SHA256SUM_STATUS:-0}"
+    if [[ "${SHA256SUM_STATUS:-0}" -ne 0 ]]; then
+      exit "$SHA256SUM_STATUS"
+    fi
+    if [[ "${1-}" == --check ]]; then
+      exit 0
+    fi
+    printf '%s  %s\n' "$FAKE_SHA256" "${1-}"
     ;;
   zstd)
     printf 'zstd %s\n' "$*" >>"$COMMAND_LOG"
@@ -83,6 +98,8 @@ SCRIPT
     ln -s tool "$FAKE_BIN/$tool"
   done
   export COMMAND_LOG
+  FAKE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export FAKE_SHA256
   PATH="$FAKE_BIN:$PATH"
 }
 
@@ -179,7 +196,7 @@ SCRIPT
   [ "$output" = /dev/loop7p2 ]
 }
 
-@test "partitioning checks the real guard and exact WIPE before destructive tools" {
+@test "partitioning completes all checks before a final guard immediately preceding wipe" {
   local expected="$BATS_TEST_TMPDIR/expected"
   make_fake_block_tools
   TARGET_MOUNT="$BATS_TEST_TMPDIR/mnt"
@@ -190,6 +207,7 @@ SCRIPT
   assert_success
 
   cat >"$expected" <<EOF
+findmnt --raw --noheadings --output TARGET
 guard /dev/nvme0n1
 wipefs --all -- /dev/nvme0n1
 sgdisk --zap-all /dev/nvme0n1
@@ -205,6 +223,53 @@ EOF
   diff -u "$expected" "$COMMAND_LOG"
 }
 
+@test "an ordinary existing but unmounted target directory is allowed" {
+  local real_findmnt
+  real_findmnt=$(command -v findmnt)
+  make_fake_block_tools
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/existing-target"
+  FINDMNT_BIN=$real_findmnt
+  WIPE_CONFIRMATION=WIPE
+  mkdir -p "$TARGET_MOUNT"
+  assert_safe_target() { printf 'guard %s\n' "$1" >>"$COMMAND_LOG"; }
+
+  run partition_target /dev/nvme0n1
+  assert_success
+  grep -Fx 'guard /dev/nvme0n1' "$COMMAND_LOG"
+  grep -Fx 'wipefs --all -- /dev/nvme0n1' "$COMMAND_LOG"
+}
+
+@test "exact target and descendant mounts are rejected before the final guard" {
+  local mounted_path
+  make_fake_block_tools
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/target"
+  WIPE_CONFIRMATION=WIPE
+  assert_safe_target() { printf 'guard %s\n' "$1" >>"$COMMAND_LOG"; }
+
+  for mounted_path in "$TARGET_MOUNT" "$TARGET_MOUNT/boot" "$TARGET_MOUNT/nested/data"; do
+    : >"$COMMAND_LOG"
+    FAKE_MOUNT_TARGETS=$mounted_path
+    export FAKE_MOUNT_TARGETS
+    run partition_target /dev/nvme0n1
+    [ "$status" -ne 0 ]
+    [ "$(<"$COMMAND_LOG")" = 'findmnt --raw --noheadings --output TARGET' ]
+  done
+}
+
+@test "a similarly prefixed mount outside the target directory is allowed" {
+  make_fake_block_tools
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/target"
+  WIPE_CONFIRMATION=WIPE
+  FAKE_MOUNT_TARGETS="$TARGET_MOUNT-other"
+  export FAKE_MOUNT_TARGETS
+  assert_safe_target() { printf 'guard %s\n' "$1" >>"$COMMAND_LOG"; }
+
+  run partition_target /dev/nvme0n1
+  assert_success
+  grep -Fx 'guard /dev/nvme0n1' "$COMMAND_LOG"
+  grep -Fx 'wipefs --all -- /dev/nvme0n1' "$COMMAND_LOG"
+}
+
 @test "test-mode environment alone never bypasses the target guard" {
   make_fake_block_tools
   TARGET_MOUNT="$BATS_TEST_TMPDIR/mnt"
@@ -217,7 +282,7 @@ EOF
 
   run partition_target /dev/loop7
   [ "$status" -ne 0 ]
-  [ "$(<"$COMMAND_LOG")" = 'guard /dev/loop7' ]
+  [ "$(<"$COMMAND_LOG")" = $'findmnt --raw --noheadings --output TARGET\nguard /dev/loop7' ]
 }
 
 @test "partitioning rejects a non-exact wipe confirmation before tools run" {
@@ -228,7 +293,7 @@ EOF
 
   run partition_target /dev/nvme0n1
   [ "$status" -ne 0 ]
-  [ "$(<"$COMMAND_LOG")" = 'guard /dev/nvme0n1' ]
+  [ ! -e "$COMMAND_LOG" ]
 }
 
 @test "extraction verifies the sidecar before streaming the payload" {
@@ -236,13 +301,13 @@ EOF
   TARGET_MOUNT="$BATS_TEST_TMPDIR/mnt"
   PAYLOAD_PATH="$BATS_TEST_TMPDIR/rootfs.tar.zst"
   : >"$PAYLOAD_PATH"
-  : >"$PAYLOAD_PATH.sha256"
+  printf '%s  ignored-name\n' "$FAKE_SHA256" >"$PAYLOAD_PATH.sha256"
   mkdir -p "$TARGET_MOUNT"
 
   run extract_target /dev/loop7
   assert_success
 
-  [ "$(sed -n '1p' "$COMMAND_LOG")" = 'sha256sum --check rootfs.tar.zst.sha256' ]
+  [ "$(sed -n '1p' "$COMMAND_LOG")" = "sha256sum $PAYLOAD_PATH" ]
   grep -Fx "zstd -dc $PAYLOAD_PATH" "$COMMAND_LOG"
   grep -Fx "bsdtar --acls --xattrs --numeric-owner -xpf - -C $TARGET_MOUNT|archive" "$COMMAND_LOG"
 }
@@ -254,13 +319,83 @@ EOF
   SHA256SUM_STATUS=1
   export SHA256SUM_STATUS
   : >"$PAYLOAD_PATH"
-  : >"$PAYLOAD_PATH.sha256"
+  printf '%s  ignored-name\n' "$FAKE_SHA256" >"$PAYLOAD_PATH.sha256"
   mkdir -p "$TARGET_MOUNT"
 
   run extract_target /dev/loop7
   [ "$status" -ne 0 ]
   [ "$(wc -l <"$COMMAND_LOG")" -eq 1 ]
-  [ "$(<"$COMMAND_LOG")" = 'sha256sum --check rootfs.tar.zst.sha256' ]
+  [ "$(<"$COMMAND_LOG")" = "sha256sum $PAYLOAD_PATH" ]
+}
+
+@test "payload digest is bound directly while the sidecar filename is ignored" {
+  local digest
+  make_fake_extract_tools
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/mnt"
+  PAYLOAD_PATH="$BATS_TEST_TMPDIR/rootfs.tar.zst"
+  SHA256SUM_BIN=$REAL_SHA256SUM
+  printf 'selected payload\n' >"$PAYLOAD_PATH"
+  digest=$("$REAL_SHA256SUM" "$PAYLOAD_PATH")
+  digest=${digest%% *}
+  printf '%s  deliberately-wrong-name\n' "$digest" >"$PAYLOAD_PATH.sha256"
+  mkdir -p "$TARGET_MOUNT"
+
+  run extract_target /dev/loop7
+  assert_success
+  grep -Fx "zstd -dc $PAYLOAD_PATH" "$COMMAND_LOG"
+}
+
+@test "a valid decoy checksum cannot authorize a tampered selected payload" {
+  make_fake_extract_tools
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/mnt"
+  PAYLOAD_PATH="$BATS_TEST_TMPDIR/rootfs.tar.zst"
+  SHA256SUM_BIN=$REAL_SHA256SUM
+  printf 'tampered selected payload\n' >"$PAYLOAD_PATH"
+  printf 'valid decoy payload\n' >"$BATS_TEST_TMPDIR/decoy.tar.zst"
+  (
+    cd "$BATS_TEST_TMPDIR"
+    "$REAL_SHA256SUM" decoy.tar.zst >rootfs.tar.zst.sha256
+  )
+  mkdir -p "$TARGET_MOUNT"
+
+  run extract_target /dev/loop7
+  [ "$status" -ne 0 ]
+  [ ! -e "$COMMAND_LOG" ]
+}
+
+@test "multiple nonblank checksum entries are rejected" {
+  make_fake_extract_tools
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/mnt"
+  PAYLOAD_PATH="$BATS_TEST_TMPDIR/rootfs.tar.zst"
+  SHA256SUM_BIN=$REAL_SHA256SUM
+  printf 'selected payload\n' >"$PAYLOAD_PATH"
+  printf 'second payload\n' >"$BATS_TEST_TMPDIR/second.tar.zst"
+  (
+    cd "$BATS_TEST_TMPDIR"
+    "$REAL_SHA256SUM" rootfs.tar.zst second.tar.zst >rootfs.tar.zst.sha256
+  )
+  mkdir -p "$TARGET_MOUNT"
+
+  run extract_target /dev/loop7
+  [ "$status" -ne 0 ]
+  [ ! -e "$COMMAND_LOG" ]
+}
+
+@test "tagged or otherwise malformed checksum entries are rejected" {
+  make_fake_extract_tools
+  TARGET_MOUNT="$BATS_TEST_TMPDIR/mnt"
+  PAYLOAD_PATH="$BATS_TEST_TMPDIR/rootfs.tar.zst"
+  SHA256SUM_BIN=$REAL_SHA256SUM
+  printf 'selected payload\n' >"$PAYLOAD_PATH"
+  (
+    cd "$BATS_TEST_TMPDIR"
+    "$REAL_SHA256SUM" --tag rootfs.tar.zst >rootfs.tar.zst.sha256
+  )
+  mkdir -p "$TARGET_MOUNT"
+
+  run extract_target /dev/loop7
+  [ "$status" -ne 0 ]
+  [ ! -e "$COMMAND_LOG" ]
 }
 
 @test "target validation requires the configured system and all loader entries" {
