@@ -1,0 +1,2 @@
+00:02.0 VGA compatible controller [0300]: Intel Corporation Alder Lake-P Integrated Graphics Controller [8086:46a6] (rev 0c)
+01:00.0 3D controller [0302]: NVIDIA Corporation GA104M [GeForce RTX 3070 Ti Laptop GPU] [10de:24a0] (rev a1)

@@ -1,0 +1,14 @@
+[Unit]
+Description=Validate hybrid graphics before enabling GNOME
+Wants=switcheroo-control.service
+After=systemd-modules-load.service switcheroo-control.service
+ConditionPathExists=!/var/lib/blade-installer/gpu-gate-passed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/blade-firstboot-gpu
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
