@@ -3,9 +3,9 @@
 setup() { REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"; }
 
 @test "build inputs are pinned and safe" {
-  run bash -eu -c '. "$1/config/build.env"; printf "%s\n" "$TARGET_DMI_FAMILY|$CODEX_RELEASE|$YAY_AUR_COMMIT|$ZRAM_MAX_MIB"' _ "$REPO_ROOT"
+  run bash -eu -c '. "$1/config/build.env"; printf "%s\n" "$TARGET_DMI_FAMILY|$CODEX_RELEASE|$CODEX_INSTALLER_SHA256|$YAY_AUR_COMMIT|$ZRAM_MAX_MIB"' _ "$REPO_ROOT"
   [ "$status" -eq 0 ]
-  [ "$output" = 'RZ09-0421|0.144.1|cb43f84828ab4f9700f7c6f9c6d7a923d4cfaff0|8192' ]
+  [ "$output" = 'RZ09-0421|0.144.1|1154e9daf713aacd1534efca8042bfd6665ad24bc1d1dfd86b8f439fe60a7a5d|cb43f84828ab4f9700f7c6f9c6d7a923d4cfaff0|8192' ]
 }
 
 @test "target list contains required desktop and GPU packages" {
