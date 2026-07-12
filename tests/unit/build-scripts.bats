@@ -45,7 +45,7 @@ EOF
   printf 'timeout 15\ndefault 01-archiso-linux.conf\n' \
     >"$ARCHISO_FIXTURE/releng/efiboot/loader/loader.conf"
   cat >"$ARCHISO_FIXTURE/releng/grub/grub.cfg" <<'EOF'
-menuentry 'Arch Linux install medium' {
+menuentry 'Arch Linux install medium' --id 'archlinux' {
   linux /arch/boot/x86_64/vmlinuz-linux archisobasedir=arch archisosearchuuid=ARCH_TEST
   initrd /arch/boot/x86_64/initramfs-linux.img
 }
@@ -69,6 +69,18 @@ EOF
   printf 'base 1.0-1\n' >"$ARCHISO_FIXTURE/payload/target-packages.txt"
   printf 'rootfs_sha256=fixture\n' \
     >"$ARCHISO_FIXTURE/payload/build-manifest.txt"
+}
+
+prepare_built_profile_fixture() {
+  prepare_archiso_fixture
+  bash -c '
+    source "$1"
+    RELENG_PROFILE=$2/releng
+    PAYLOAD_DIR=$2/payload
+    PROFILE_DIR=$3
+    AIROOTFS_DIR=$PROFILE_DIR/airootfs
+    prepare_profile >/dev/null
+  ' _ "$PREPARE_ARCHISO" "$ARCHISO_FIXTURE" "$ARCHISO_PROFILE_OUTPUT"
 }
 
 prepare_manifest_fixture() {
@@ -832,6 +844,256 @@ teardown() {
     set -e
     [[ $mismatch_status -ne 0 ]]
   ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_FIXTURE"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact boot verification rejects a missing rescue guard in every active config" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      cp "$file" "$file.clean"
+      if [[ $kind == grub ]]; then
+        sed -i "/--id .blade-rescue./,/^}/s/ blade.noinstaller=1//" "$file"
+      else
+        sed -i "/^LABEL blade-rescue$/,/^LABEL /s/ blade.noinstaller=1//" "$file"
+      fi
+      printf "# blade.noinstaller=1 decoy\n" >>"$file"
+      set +e
+      verify_boot_entries >/dev/null 2>&1
+      verify_status=$?
+      set -e
+      mv "$file.clean" "$file"
+      [[ $verify_status -ne 0 ]] || {
+        printf "accepted missing rescue guard in %s\n" "$spec" >&2
+        exit 1
+      }
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact boot verification rejects misplaced QEMU flags in every active config" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      for guard in blade.test=1 console=ttyS0,115200n8; do
+        cp "$file" "$file.clean"
+        if [[ $kind == grub ]]; then
+          sed -i "/--id .blade-qemu-test./,/^}/s/ $guard//" "$file"
+        else
+          sed -i "/^LABEL blade-qemu-test$/,/^LABEL /s/ $guard//" "$file"
+        fi
+        printf "# %s decoy\n" "$guard" >>"$file"
+        set +e
+        verify_boot_entries >/dev/null 2>&1
+        verify_status=$?
+        set -e
+        mv "$file.clean" "$file"
+        [[ $verify_status -ne 0 ]] || {
+          printf "accepted misplaced QEMU flag %s in %s\n" "$guard" "$spec" >&2
+          exit 1
+        }
+      done
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact boot verification rejects missing text and blacklist guards in each default stanza" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    guards=(
+      systemd.unit=multi-user.target
+      modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm
+    )
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      for guard in "${guards[@]}"; do
+        cp "$file" "$file.clean"
+        if [[ $kind == grub ]]; then
+          sed -i "/--id .archlinux./,/^}/s/ $guard//" "$file"
+        else
+          sed -i "/^LABEL arch$/,/^LABEL /s/ $guard//" "$file"
+        fi
+        printf "# %s decoy\n" "$guard" >>"$file"
+        set +e
+        verify_boot_entries >/dev/null 2>&1
+        verify_status=$?
+        set -e
+        mv "$file.clean" "$file"
+        [[ $verify_status -ne 0 ]] || {
+          printf "accepted missing default guard %s in %s\n" "$guard" "$spec" >&2
+          exit 1
+        }
+      done
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact boot verification rejects wrong labels despite valid global arguments" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      cp "$file" "$file.clean"
+      if [[ $kind == grub ]]; then
+        sed -i "/--id .blade-rescue./s/Rescue shell/Broken rescue/" "$file"
+      else
+        sed -i "/^LABEL blade-rescue$/,/^LABEL /s/^MENU LABEL .*/MENU LABEL Broken rescue label/" "$file"
+      fi
+      set +e
+      verify_boot_entries >/dev/null 2>&1
+      verify_status=$?
+      set -e
+      mv "$file.clean" "$file"
+      [[ $verify_status -ne 0 ]] || {
+        printf "accepted wrong label in %s\n" "$spec" >&2
+        exit 1
+      }
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact service verification rejects every removed or commented exact guard" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    INNER_ROOT=$2/airootfs
+    verify_service_units
+    specs=(
+      "blade-installer.service|ConditionKernelCommandLine=!blade.noinstaller=1"
+      "blade-installer.service|ConditionKernelCommandLine=!blade.test=1"
+      "blade-installer.service|TTYPath=/dev/tty1"
+      "blade-installer-serial.service|ConditionKernelCommandLine=blade.test=1"
+      "blade-installer-serial.service|ConditionKernelCommandLine=!blade.noinstaller=1"
+      "blade-installer-serial.service|ExecCondition=/usr/local/bin/blade-qemu-serial-gate"
+      "blade-installer-serial.service|TTYPath=/dev/ttyS0"
+      "blade-qemu-rescue.service|ConditionKernelCommandLine=blade.test=1"
+      "blade-qemu-rescue.service|ConditionKernelCommandLine=blade.noinstaller=1"
+      "blade-qemu-rescue.service|ExecCondition=/usr/local/bin/blade-qemu-serial-gate"
+    )
+    for spec in "${specs[@]}"; do
+      unit=${spec%%|*}
+      required=${spec#*|}
+      file=$INNER_ROOT/etc/systemd/system/$unit
+      cp "$file" "$file.clean"
+      awk -v required="$required" \
+        "BEGIN { changed=0 } !changed && \$0 == required { print \"#\" \$0; changed=1; next } { print }" \
+        "$file" >"$file.changed"
+      mv "$file.changed" "$file"
+      set +e
+      verify_service_units >/dev/null 2>&1
+      verify_status=$?
+      set -e
+      mv "$file.clean" "$file"
+      [[ $verify_status -ne 0 ]] || {
+        printf "accepted commented guard %s in %s\n" "$required" "$unit" >&2
+        exit 1
+      }
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact service verification rejects a guard moved to another unit" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    INNER_ROOT=$2/airootfs
+    verify_service_units
+    serial=$INNER_ROOT/etc/systemd/system/blade-installer-serial.service
+    physical=$INNER_ROOT/etc/systemd/system/blade-installer.service
+    sed -i "/^ExecCondition=\/usr\/local\/bin\/blade-qemu-serial-gate$/d" "$serial"
+    printf "ExecCondition=/usr/local/bin/blade-qemu-serial-gate\n" >>"$physical"
+    set +e
+    verify_service_units >/dev/null 2>&1
+    verify_status=$?
+    set -e
+    [[ $verify_status -ne 0 ]]
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact service verification rejects every wrong enablement symlink target" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    INNER_ROOT=$2/airootfs
+    verify_service_units
+    wants=$INNER_ROOT/etc/systemd/system/multi-user.target.wants
+    services=(blade-installer.service blade-installer-serial.service blade-qemu-rescue.service)
+    for service in "${services[@]}"; do
+      link=$wants/$service
+      expected=$(readlink "$link")
+      ln -sfn ../blade-qemu-rescue.service "$link"
+      if [[ $service == blade-qemu-rescue.service ]]; then
+        ln -sfn ../blade-installer.service "$link"
+      fi
+      set +e
+      verify_service_units >/dev/null 2>&1
+      verify_status=$?
+      set -e
+      ln -sfn "$expected" "$link"
+      [[ $verify_status -ne 0 ]] || {
+        printf "accepted wrong symlink target for %s\n" "$service" >&2
+        exit 1
+      }
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
 
   [ "$status" -eq 0 ]
 }

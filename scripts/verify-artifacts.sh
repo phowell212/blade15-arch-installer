@@ -10,6 +10,10 @@ VERIFY_DIR="$BUILD_DIR/artifact-verify"
 ISO_TREE="$VERIFY_DIR/iso"
 INNER_ROOT="$VERIFY_DIR/airootfs"
 SAFE_BOOT_ARGS='systemd.unit=multi-user.target modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'
+RESCUE_LABEL='Rescue shell (no installer)'
+QEMU_TEST_LABEL='QEMU serial installer test'
+QEMU_RESCUE_LABEL='QEMU serial rescue test'
+QEMU_TEST_ARGS='blade.test=1 console=tty0 console=ttyS0,115200n8'
 
 print_plan() {
   printf '%s\n' \
@@ -101,6 +105,122 @@ verify_boot_file_lines() {
   ' "$file" || die "$family artifact has an unsafe or missing Linux boot entry: $file"
 }
 
+extract_grub_stanza() {
+  local file=$1
+  local marker=$2
+
+  awk -v marker="$marker" '
+    /^menuentry[[:space:]]/ {
+      active = index($0, marker) > 0
+      if (active) found++
+    }
+    active && $0 !~ /^[[:space:]]*#/ { print }
+    active && /^}/ { active = 0 }
+    END { if (found != 1 || active) exit 42 }
+  ' "$file"
+}
+
+extract_syslinux_stanza() {
+  local file=$1
+  local target_label=$2
+
+  awk -v target="$target_label" '
+    $1 == "LABEL" {
+      active = ($2 == target)
+      if (active) found++
+    }
+    active && $0 !~ /^[[:space:]]*#/ { print }
+    END { if (found != 1) exit 42 }
+  ' "$file"
+}
+
+require_stanza_values() {
+  local block=$1
+  local description=$2
+  shift 2
+  local required
+
+  for required in "$@"; do
+    if [[ "$block" != *"$required"* ]]; then
+      die "$description lacks required value: $required"
+      return
+    fi
+  done
+}
+
+verify_grub_stanzas() {
+  local file=$1
+  local block
+
+  verify_boot_file_lines "$file" 'UEFI GRUB' grub || return
+  block=$(extract_grub_stanza "$file" "--id 'archlinux'") ||
+    die "UEFI GRUB default stanza is missing or duplicated: $file"
+  require_stanza_values "$block" 'UEFI GRUB default stanza' \
+    'Arch Linux install medium' "$SAFE_BOOT_ARGS" || return
+  block=$(extract_grub_stanza "$file" "--id 'blade-rescue'") ||
+    die "UEFI GRUB rescue stanza is missing or duplicated: $file"
+  require_stanza_values "$block" 'UEFI GRUB rescue stanza' \
+    "menuentry '$RESCUE_LABEL'" "$SAFE_BOOT_ARGS" 'blade.noinstaller=1' || return
+  block=$(extract_grub_stanza "$file" "--id 'blade-qemu-test'") ||
+    die "UEFI GRUB QEMU test stanza is missing or duplicated: $file"
+  require_stanza_values "$block" 'UEFI GRUB QEMU test stanza' \
+    "menuentry '$QEMU_TEST_LABEL'" "$SAFE_BOOT_ARGS" "$QEMU_TEST_ARGS" || return
+  block=$(extract_grub_stanza "$file" "--id 'blade-qemu-rescue'") ||
+    die "UEFI GRUB QEMU rescue stanza is missing or duplicated: $file"
+  require_stanza_values "$block" 'UEFI GRUB QEMU rescue stanza' \
+    "menuentry '$QEMU_RESCUE_LABEL'" "$SAFE_BOOT_ARGS" "$QEMU_TEST_ARGS" \
+    'blade.noinstaller=1' || return
+}
+
+verify_syslinux_default_stanzas() {
+  local file=$1
+
+  awk -v safe="$SAFE_BOOT_ARGS" '
+    function verify_previous() {
+      if (label != "" && label !~ /^blade-/ && has_linux) {
+        defaults++
+        if (index(block, safe) == 0) exit 42
+      }
+    }
+    $1 == "LABEL" {
+      verify_previous()
+      label = $2
+      block = $0
+      has_linux = 0
+      next
+    }
+    label != "" && $0 !~ /^[[:space:]]*#/ {
+      block = block "\n" $0
+      if ($1 == "LINUX" && $0 ~ /\/vmlinuz-linux([[:space:]]|$)/) has_linux = 1
+    }
+    END {
+      verify_previous()
+      if (defaults == 0) exit 43
+    }
+  ' "$file" || die "BIOS Syslinux default stanza is unsafe or missing: $file"
+}
+
+verify_syslinux_stanzas() {
+  local file=$1
+  local block
+
+  verify_boot_file_lines "$file" 'BIOS Syslinux' syslinux || return
+  verify_syslinux_default_stanzas "$file" || return
+  block=$(extract_syslinux_stanza "$file" blade-rescue) ||
+    die "BIOS Syslinux rescue stanza is missing or duplicated: $file"
+  require_stanza_values "$block" 'BIOS Syslinux rescue stanza' \
+    "MENU LABEL $RESCUE_LABEL" "$SAFE_BOOT_ARGS" 'blade.noinstaller=1' || return
+  block=$(extract_syslinux_stanza "$file" blade-qemu-test) ||
+    die "BIOS Syslinux QEMU test stanza is missing or duplicated: $file"
+  require_stanza_values "$block" 'BIOS Syslinux QEMU test stanza' \
+    "MENU LABEL $QEMU_TEST_LABEL" "$SAFE_BOOT_ARGS" "$QEMU_TEST_ARGS" || return
+  block=$(extract_syslinux_stanza "$file" blade-qemu-rescue) ||
+    die "BIOS Syslinux QEMU rescue stanza is missing or duplicated: $file"
+  require_stanza_values "$block" 'BIOS Syslinux QEMU rescue stanza' \
+    "MENU LABEL $QEMU_RESCUE_LABEL" "$SAFE_BOOT_ARGS" "$QEMU_TEST_ARGS" \
+    'blade.noinstaller=1' || return
+}
+
 verify_boot_entries() {
   local file
   local -a grub_files=()
@@ -109,28 +229,82 @@ verify_boot_entries() {
   mapfile -d '' -t grub_files < <(
     find "$ISO_TREE" -type f \( -name grub.cfg -o -name loopback.cfg \) -print0
   )
-  ((${#grub_files[@]} >= 2)) || die 'ISO lacks active UEFI GRUB configurations'
+  ((${#grub_files[@]} >= 2)) || {
+    die 'ISO lacks active UEFI GRUB configurations'
+    return
+  }
   for file in "${grub_files[@]}"; do
-    verify_boot_file_lines "$file" 'UEFI GRUB' grub
+    verify_grub_stanzas "$file" || return
   done
 
   mapfile -d '' -t syslinux_files < <(
     find "$ISO_TREE" -type f \( -name archiso_sys-linux.cfg -o \
       -name archiso_pxe-linux.cfg \) -print0
   )
-  ((${#syslinux_files[@]} >= 2)) || die 'ISO lacks generated Syslinux configurations'
+  ((${#syslinux_files[@]} >= 2)) || {
+    die 'ISO lacks generated Syslinux configurations'
+    return
+  }
   for file in "${syslinux_files[@]}"; do
-    verify_boot_file_lines "$file" Syslinux syslinux
+    verify_syslinux_stanzas "$file" || return
   done
+}
 
-  grep -R -Fq 'Rescue shell (no installer)' "$ISO_TREE" ||
-    die 'ISO lacks the rescue boot label'
-  grep -R -Fq 'blade.noinstaller=1' "$ISO_TREE" ||
-    die 'ISO rescue entry lacks blade.noinstaller=1'
-  grep -R -Fq 'QEMU serial installer test' "$ISO_TREE" ||
-    die 'ISO lacks the QEMU test label'
-  grep -R -Fq 'blade.test=1' "$ISO_TREE" ||
-    die 'ISO QEMU test entry lacks blade.test=1'
+require_unit_line() {
+  local unit=$1
+  local required=$2
+  local count
+
+  count=$(grep -Fxc -- "$required" "$unit" || true)
+  [[ "$count" -eq 1 ]] ||
+    die "service unit must contain one exact active line '$required': $unit"
+}
+
+require_enabled_service() {
+  local service=$1
+  local system_dir="$INNER_ROOT/etc/systemd/system"
+  local link="$system_dir/multi-user.target.wants/$service"
+  local target
+
+  [[ -f "$system_dir/$service" && ! -L "$system_dir/$service" ]] || {
+    die "inner service unit is missing or unsafe: $service"
+    return
+  }
+  [[ -L "$link" ]] || {
+    die "inner service is not enabled: $service"
+    return
+  }
+  target=$(readlink "$link")
+  [[ "$target" == "../$service" ]] ||
+    die "inner service enablement has the wrong target: $service -> $target"
+}
+
+verify_service_units() {
+  local system_dir="$INNER_ROOT/etc/systemd/system"
+  local physical="$system_dir/blade-installer.service"
+  local rescue="$system_dir/blade-qemu-rescue.service"
+  local serial="$system_dir/blade-installer-serial.service"
+
+  require_enabled_service blade-installer.service || return
+  require_enabled_service blade-installer-serial.service || return
+  require_enabled_service blade-qemu-rescue.service || return
+
+  require_unit_line "$physical" 'ConditionKernelCommandLine=!blade.noinstaller=1' || return
+  require_unit_line "$physical" 'ConditionKernelCommandLine=!blade.test=1' || return
+  require_unit_line "$physical" 'ExecStart=/usr/local/bin/blade-install' || return
+  require_unit_line "$physical" 'TTYPath=/dev/tty1' || return
+
+  require_unit_line "$serial" 'ConditionKernelCommandLine=blade.test=1' || return
+  require_unit_line "$serial" 'ConditionKernelCommandLine=!blade.noinstaller=1' || return
+  require_unit_line "$serial" 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' || return
+  require_unit_line "$serial" 'ExecStart=/usr/local/bin/blade-install' || return
+  require_unit_line "$serial" 'TTYPath=/dev/ttyS0' || return
+
+  require_unit_line "$rescue" 'ConditionKernelCommandLine=blade.test=1' || return
+  require_unit_line "$rescue" 'ConditionKernelCommandLine=blade.noinstaller=1' || return
+  require_unit_line "$rescue" 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' || return
+  require_unit_line "$rescue" \
+    'ExecStart=-/usr/bin/agetty --autologin root --noclear 115200 ttyS0 vt100' || return
 }
 
 verify_inner_root() {
@@ -155,33 +329,10 @@ verify_inner_root() {
     die 'published package manifest differs from the inner manifest'
   cmp -s "$payload_dir/build-manifest.txt" "$DIST_DIR/build-manifest.txt" ||
     die 'published build manifest differs from the inner manifest'
-  [[ -f "$INNER_ROOT/etc/systemd/system/blade-installer.service" ]] ||
-    die 'inner physical installer service is missing'
-  [[ -f "$INNER_ROOT/etc/systemd/system/blade-installer-serial.service" ]] ||
-    die 'inner serial test service is missing'
-  [[ -f "$INNER_ROOT/etc/systemd/system/blade-qemu-rescue.service" ]] ||
-    die 'inner serial rescue service is missing'
   [[ -f "$INNER_ROOT/usr/local/bin/blade-qemu-serial-gate" &&
     $(stat -c '%a' "$INNER_ROOT/usr/local/bin/blade-qemu-serial-gate") == 755 ]] ||
     die 'inner QEMU serial gate is missing or not mode 0755'
-  [[ -L "$INNER_ROOT/etc/systemd/system/multi-user.target.wants/blade-installer.service" ]] ||
-    die 'inner physical installer service is not enabled'
-  [[ -L "$INNER_ROOT/etc/systemd/system/multi-user.target.wants/blade-installer-serial.service" ]] ||
-    die 'inner serial test service is not enabled'
-  [[ -L "$INNER_ROOT/etc/systemd/system/multi-user.target.wants/blade-qemu-rescue.service" ]] ||
-    die 'inner serial rescue service is not enabled'
-  grep -Fq 'TTYPath=/dev/tty1' \
-    "$INNER_ROOT/etc/systemd/system/blade-installer.service" ||
-    die 'physical installer service no longer uses tty1'
-  grep -Fq 'blade.test=1' \
-    "$INNER_ROOT/etc/systemd/system/blade-installer-serial.service" ||
-    die 'serial test service is not conditioned on blade.test=1'
-  grep -Fq 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' \
-    "$INNER_ROOT/etc/systemd/system/blade-installer-serial.service" ||
-    die 'serial test service lacks the QEMU DMI gate'
-  grep -Fq 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' \
-    "$INNER_ROOT/etc/systemd/system/blade-qemu-rescue.service" ||
-    die 'serial rescue service lacks the QEMU DMI gate'
+  verify_service_units
 }
 
 verify_artifacts() {
