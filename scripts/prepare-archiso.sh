@@ -60,7 +60,9 @@ profile_has_exact_bootmodes() (
   local first=$2
   local second=$3
 
-  unset bootmodes
+  declare -a bootmodes=()
+  # profiledef.sh assigns this associative array while being sourced.
+  # shellcheck disable=SC2034
   declare -A file_permissions=()
   # The installed releng profile is trusted build input and defines bootmodes.
   # shellcheck disable=SC1090
