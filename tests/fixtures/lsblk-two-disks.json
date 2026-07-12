@@ -1,0 +1,52 @@
+{
+  "blockdevices": [
+    {
+      "name": "nvme0n1",
+      "path": "/dev/nvme0n1",
+      "type": "disk",
+      "size": 1000204886016,
+      "model": "SAMSUNG MZVL21T0HCLR-00BL2",
+      "serial": "NVME-INTERNAL-001",
+      "tran": "nvme",
+      "rm": false,
+      "mountpoints": [null],
+      "children": [
+        {
+          "name": "nvme0n1p1",
+          "path": "/dev/nvme0n1p1",
+          "type": "part",
+          "size": 1000202788864,
+          "model": null,
+          "serial": null,
+          "tran": null,
+          "rm": false,
+          "mountpoints": [null]
+        }
+      ]
+    },
+    {
+      "name": "sdb",
+      "path": "/dev/sdb",
+      "type": "disk",
+      "size": 32000000000,
+      "model": "Arch Linux USB",
+      "serial": "LIVE-USB-001",
+      "tran": "usb",
+      "rm": false,
+      "mountpoints": [null],
+      "children": [
+        {
+          "name": "sdb1",
+          "path": "/dev/sdb1",
+          "type": "part",
+          "size": 31998951424,
+          "model": null,
+          "serial": null,
+          "tran": null,
+          "rm": false,
+          "mountpoints": ["/run/archiso/bootmnt"]
+        }
+      ]
+    }
+  ]
+}
