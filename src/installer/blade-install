@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+set +x
+
+_blade_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${BLADE_INSTALL_LIB_DIR:-}" ]]; then
+  _blade_lib_dir=$BLADE_INSTALL_LIB_DIR
+elif [[ -d "$_blade_script_dir/lib" ]]; then
+  _blade_lib_dir=$_blade_script_dir/lib
+elif [[ -d /usr/local/lib/blade-installer ]]; then
+  _blade_lib_dir=/usr/local/lib/blade-installer
+else
+  _blade_lib_dir=/usr/lib/blade-installer
+fi
+# shellcheck source=/dev/null
+source "$_blade_lib_dir/common.sh"
+# shellcheck source=/dev/null
+source "$_blade_lib_dir/preflight.sh"
+# shellcheck source=/dev/null
+source "$_blade_lib_dir/disks.sh"
+# shellcheck source=/dev/null
+source "$_blade_lib_dir/identity.sh"
+# shellcheck source=/dev/null
+source "$_blade_lib_dir/install.sh"
+unset _blade_script_dir _blade_lib_dir
+
+TARGET_MOUNT=${TARGET_MOUNT:-/mnt}
+PAYLOAD_PATH=${PAYLOAD_PATH:-/usr/share/blade-installer/rootfs.tar.zst}
+PAYLOAD_CHECKSUM_PATH=${PAYLOAD_CHECKSUM_PATH:-$PAYLOAD_PATH.sha256}
+LIVE_INSTALL_LOG=${LIVE_INSTALL_LOG:-/var/log/blade-arch-installer.log}
+CURRENT_PHASE=initialization
+SELECTED_TARGET=''
+INSTALL_HOSTNAME=''
+INSTALL_USERNAME=''
+INSTALL_PASSWORD=''
+WIPE_CONFIRMATION=''
+
+_append_install_report() {
+  local result=$1
+  local line
+
+  line="$(date --iso-8601=seconds) result=$result phase=$CURRENT_PHASE target=${SELECTED_TARGET:-none} hostname=${INSTALL_HOSTNAME:-none} user=${INSTALL_USERNAME:-none}"
+  if [[ -e "$LIVE_INSTALL_LOG" || -w "$(dirname -- "$LIVE_INSTALL_LOG")" ]]; then
+    printf '%s\n' "$line" >>"$LIVE_INSTALL_LOG" 2>/dev/null || true
+  fi
+  if [[ -d "$TARGET_MOUNT/var/log" && -w "$TARGET_MOUNT/var/log" ]]; then
+    printf '%s\n' "$line" >>"$TARGET_MOUNT/var/log/blade-arch-installer.log" 2>/dev/null || true
+  fi
+}
+
+installer_failure() {
+  local status=${1:-1}
+
+  trap - ERR EXIT
+  set +e
+  "${SYNC_BIN:-sync}"
+  _append_install_report failure
+  INSTALL_PASSWORD=''
+  unset INSTALL_PASSWORD
+  printf 'ERROR: Installation failed during %s (status %d).\n' "$CURRENT_PHASE" "$status" >&2
+  printf 'The target was not advanced to a later phase. Review %s.\n' "$LIVE_INSTALL_LOG" >&2
+
+  if [[ -t 0 && -t 1 && "${BLADE_FAILURE_SHELL:-1}" == 1 ]]; then
+    printf 'Opening a live recovery shell; exit it when finished.\n' >&2
+    exec "${FAILURE_SHELL_BIN:-/bin/bash}" --noprofile --norc
+  fi
+  exit "$status"
+}
+
+_run_phase() {
+  CURRENT_PHASE=$1
+  shift
+  "$@"
+}
+
+_phase_preflight() {
+  local command_name
+
+  ((EUID == 0)) || die "The installer must run as root"
+  require_supported_platform
+  [[ -r "$PAYLOAD_PATH" ]] || die "Root filesystem payload is missing"
+  [[ -r "$PAYLOAD_CHECKSUM_PATH" ]] || die "Root filesystem checksum is missing"
+  for command_name in jq lsblk findmnt wipefs sgdisk partprobe udevadm \
+    mkfs.fat mkfs.ext4 mount umount sha256sum zstd bsdtar arch-chroot systemctl; do
+    command -v "$command_name" >/dev/null || die "Required installer command is missing: $command_name"
+  done
+}
+
+_phase_select() {
+  local -a targets=()
+  local index
+  local selection
+
+  mapfile -t targets < <(candidate_disks)
+  ((${#targets[@]} > 0)) || die "No safe internal target disks are available"
+
+  printf '\nSafe installation targets:\n'
+  for index in "${!targets[@]}"; do
+    printf '  %d) ' "$((index + 1))"
+    "${LSBLK_BIN:-lsblk}" -dn -o PATH,SIZE,MODEL,SERIAL,TRAN -- "${targets[$index]}"
+  done
+  printf 'Select a target number: '
+  IFS= read -r selection || die "Unable to read target selection"
+  [[ "$selection" =~ ^[1-9][0-9]*$ ]] || die "Invalid target selection"
+  ((selection <= ${#targets[@]})) || die "Invalid target selection"
+  SELECTED_TARGET=${targets[$((selection - 1))]}
+  assert_safe_target "$SELECTED_TARGET"
+}
+
+_phase_identity() {
+  local password_confirm=''
+
+  printf 'Hostname [%s]: ' "$DEFAULT_HOSTNAME"
+  IFS= read -r INSTALL_HOSTNAME || die "Unable to read hostname"
+  INSTALL_HOSTNAME=${INSTALL_HOSTNAME:-$DEFAULT_HOSTNAME}
+  valid_hostname "$INSTALL_HOSTNAME" || die "Invalid hostname"
+
+  printf 'Local username: '
+  IFS= read -r INSTALL_USERNAME || die "Unable to read username"
+  valid_username "$INSTALL_USERNAME" || die "Invalid username"
+
+  printf 'Password: ' >&2
+  IFS= read -r -s INSTALL_PASSWORD || die "Unable to read password"
+  printf '\nConfirm password: ' >&2
+  IFS= read -r -s password_confirm || die "Unable to read password confirmation"
+  printf '\n' >&2
+  ((${#INSTALL_PASSWORD} >= 8)) || die "Password must contain at least eight characters"
+  if [[ "$INSTALL_PASSWORD" != "$password_confirm" ]]; then
+    INSTALL_PASSWORD=''
+    password_confirm=''
+    unset INSTALL_PASSWORD password_confirm
+    die "Password entries do not match"
+  fi
+  password_confirm=''
+  unset password_confirm
+}
+
+_phase_summary() {
+  printf '\nDESTRUCTIVE INSTALL SUMMARY\n'
+  printf '  Target:   %s\n' "$SELECTED_TARGET"
+  "${LSBLK_BIN:-lsblk}" -dn -o PATH,SIZE,MODEL,SERIAL,TRAN -- "$SELECTED_TARGET"
+  printf '  Hostname: %s\n' "$INSTALL_HOSTNAME"
+  printf '  User:     %s\n' "$INSTALL_USERNAME"
+  printf '  Layout:   GPT, 1 GiB FAT32 /boot, remaining ext4 /\n'
+  printf '  Encryption: NONE\n\n'
+}
+
+_phase_wipe() {
+  printf 'Type WIPE exactly to erase %s: ' "$SELECTED_TARGET"
+  IFS= read -r WIPE_CONFIRMATION || die "Unable to read wipe confirmation"
+  require_wipe_confirmation "$WIPE_CONFIRMATION" || die "Installation cancelled: WIPE was not entered exactly"
+}
+
+_phase_partition() {
+  partition_target "$SELECTED_TARGET"
+}
+
+_phase_extract() {
+  extract_target "$SELECTED_TARGET"
+}
+
+_phase_configure() {
+  local root_uuid
+  local password_status=0
+
+  write_target_config "$TARGET_MOUNT" "$INSTALL_USERNAME" "$INSTALL_HOSTNAME"
+  "${ARCH_CHROOT_BIN:-arch-chroot}" "$TARGET_MOUNT" \
+    useradd --create-home --groups wheel --shell /bin/bash "$INSTALL_USERNAME"
+  if printf '%s:%s\n' "$INSTALL_USERNAME" "$INSTALL_PASSWORD" |
+    "${ARCH_CHROOT_BIN:-arch-chroot}" "$TARGET_MOUNT" chpasswd; then
+    password_status=0
+  else
+    password_status=$?
+  fi
+  INSTALL_PASSWORD=''
+  unset INSTALL_PASSWORD
+  ((password_status == 0)) || die "Unable to set the account password"
+
+  "${ARCH_CHROOT_BIN:-arch-chroot}" "$TARGET_MOUNT" passwd --lock root
+  "${ARCH_CHROOT_BIN:-arch-chroot}" "$TARGET_MOUNT" locale-gen
+  "${ARCH_CHROOT_BIN:-arch-chroot}" "$TARGET_MOUNT" systemd-machine-id-setup
+  root_uuid=$(_filesystem_uuid "$TARGET_MOUNT" '' ROOT_UUID)
+  install_systemd_boot "$TARGET_MOUNT" "$root_uuid"
+}
+
+_phase_validate() {
+  verify_target "$TARGET_MOUNT"
+}
+
+_phase_sync_unmount() {
+  _append_install_report success
+  "${SYNC_BIN:-sync}"
+  "${UMOUNT_BIN:-umount}" "$TARGET_MOUNT/boot"
+  "${UMOUNT_BIN:-umount}" "$TARGET_MOUNT"
+}
+
+_phase_finish() {
+  local action=''
+
+  printf '\nInstallation complete. Remove the USB before the next boot.\n'
+  [[ -t 0 ]] || return 0
+  printf 'Choose [r]eboot, [s]hutdown, or press Enter for a live shell: '
+  IFS= read -r action || return 0
+  case "$action" in
+    r | R) "${SYSTEMCTL_BIN:-systemctl}" reboot ;;
+    s | S) "${SYSTEMCTL_BIN:-systemctl}" poweroff ;;
+    *)
+      printf 'Installer finished; opening a live shell.\n'
+      exec "${FAILURE_SHELL_BIN:-/bin/bash}" --noprofile --norc
+      ;;
+  esac
+}
+
+main() {
+  trap 'installer_failure "$?"' ERR EXIT
+  _run_phase preflight _phase_preflight
+  _run_phase select _phase_select
+  _run_phase identity _phase_identity
+  _run_phase summary _phase_summary
+  _run_phase WIPE _phase_wipe
+  _run_phase partition _phase_partition
+  _run_phase extract _phase_extract
+  _run_phase configure _phase_configure
+  _run_phase validate _phase_validate
+  _run_phase sync/unmount _phase_sync_unmount
+  _run_phase finish _phase_finish
+  trap - ERR EXIT
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
