@@ -3,3 +3,9 @@ outputs/
 work/
 .worktrees/
 .superpowers/
+/build/
+/dist/
+*.iso
+*.img
+*.qcow2
+*.tar.zst

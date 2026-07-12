@@ -1,0 +1,13 @@
+arch-install-scripts
+bash
+coreutils
+dosfstools
+e2fsprogs
+gptfdisk
+util-linux
+pciutils
+dmidecode
+efibootmgr
+zstd
+jq
+pv
