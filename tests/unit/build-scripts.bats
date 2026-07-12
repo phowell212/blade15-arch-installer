@@ -8,6 +8,8 @@ setup() {
   PREPARE_ARCHISO="$REPO_ROOT/scripts/prepare-archiso.sh"
   BUILD_ISO="$REPO_ROOT/scripts/build-iso.sh"
   VERIFY_ARTIFACTS="$REPO_ROOT/scripts/verify-artifacts.sh"
+  QEMU_EXPECT="$REPO_ROOT/tests/integration/qemu-boot.exp"
+  QEMU_FAKE_CHILD="$REPO_ROOT/tests/fixtures/qemu-fake-child.sh"
 }
 
 prepare_archiso_fixture() {
@@ -727,6 +729,48 @@ teardown() {
   grep -F 'CANCEL' "$expect_script"
   grep -F 'qemu-img map --output=json' "$harness"
   grep -F 'qemu boot: PASS' "$harness"
+}
+
+@test "Expect harness accepts successful rescue and installer fake children" {
+  local mode
+
+  for mode in rescue installer; do
+    run env QEMU_EXPECT_TIMEOUT=3 expect "$QEMU_EXPECT" \
+      --fake "$mode" success "$QEMU_FAKE_CHILD"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "Expect harness rejects a fake child transition timeout" {
+  run env QEMU_EXPECT_TIMEOUT=1 expect "$QEMU_EXPECT" \
+    --fake installer timeout "$QEMU_FAKE_CHILD"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'timed out waiting for the archiso boot menu'* ]]
+}
+
+@test "Expect harness rejects early fake-child EOF" {
+  run env QEMU_EXPECT_TIMEOUT=2 expect "$QEMU_EXPECT" \
+    --fake installer early-eof "$QEMU_FAKE_CHILD"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'exited before the serial installer banner'* ]]
+}
+
+@test "Expect harness rejects a nonzero fake-child exit" {
+  run env QEMU_EXPECT_TIMEOUT=3 expect "$QEMU_EXPECT" \
+    --fake installer nonzero "$QEMU_FAKE_CHILD"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'child exited with status 7'* ]]
+}
+
+@test "Expect harness rejects fake-child signal termination" {
+  run env QEMU_EXPECT_TIMEOUT=3 expect "$QEMU_EXPECT" \
+    --fake installer signal "$QEMU_FAKE_CHILD"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'child terminated by signal'* ]]
 }
 
 @test "live banner identifies the destructive installer" {

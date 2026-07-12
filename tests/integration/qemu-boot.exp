@@ -1,116 +1,189 @@
 #!/usr/bin/expect -f
 
+set child_started 0
+set child_reaped 0
+
+proc stop_child {} {
+    global child_reaped child_started spawn_id
+
+    if {!$child_started || $child_reaped} {
+        return
+    }
+    catch {exec kill -TERM [exp_pid -i $spawn_id]}
+    catch {close -i $spawn_id}
+    catch {wait -i $spawn_id}
+    set child_reaped 1
+}
+
 proc fail {message} {
     puts stderr "qemu boot failure: $message"
+    stop_child
     exit 1
 }
 
-proc wait_for_boot_menu {} {
-    expect {
-        -re {QEMU serial rescue test} { return }
-        timeout { fail "timed out waiting for the archiso boot menu" }
-        eof { fail "QEMU exited before the archiso boot menu" }
+proc expect_transition {pattern timeout_message eof_message} {
+    global spawn_id
+
+    expect -i $spawn_id \
+        -re $pattern { return } \
+        timeout [list fail $timeout_message] \
+        eof [list fail $eof_message]
+}
+
+proc send_checked {text description} {
+    global spawn_id
+
+    if {[catch {send -i $spawn_id -- $text} send_error]} {
+        fail "unable to send $description: $send_error"
     }
 }
 
 proc select_from_end {steps_up} {
-    send -- "\033\[F"
+    send_checked "\033\[F" "boot-menu End key"
     for {set index 0} {$index < $steps_up} {incr index} {
-        send -- "\033\[A"
+        send_checked "\033\[A" "boot-menu Up key"
     }
-    send -- "\r"
+    send_checked "\r" "boot-menu selection"
 }
 
-if {$argc != 6} {
-    fail "usage: qemu-boot.exp MODE ISO DISK OVMF_CODE OVMF_VARS ACCEL"
+proc validate_wait_result {result} {
+    global child_reaped
+
+    set child_reaped 1
+    if {[llength $result] < 4} {
+        fail "child wait returned a malformed result: $result"
+    }
+    if {[lindex $result 2] != 0} {
+        fail "child wait reported an OS error: [lindex $result 3]"
+    }
+    set signal_index [lsearch -exact $result CHILDKILLED]
+    if {$signal_index >= 0} {
+        set signal [lindex $result [expr {$signal_index + 1}]]
+        fail "child terminated by signal $signal"
+    }
+    set child_status [lindex $result 3]
+    if {$child_status != 0} {
+        fail "child exited with status $child_status"
+    }
 }
 
-set mode [lindex $argv 0]
-set iso [lindex $argv 1]
-set disk [lindex $argv 2]
-set ovmf_code [lindex $argv 3]
-set ovmf_vars [lindex $argv 4]
-set accel [lindex $argv 5]
 set timeout 240
-set cpu "max"
-if {$accel eq "kvm"} {
-    set cpu "host"
+if {[info exists env(QEMU_EXPECT_TIMEOUT)]} {
+    if {![string is integer -strict $env(QEMU_EXPECT_TIMEOUT)] ||
+        $env(QEMU_EXPECT_TIMEOUT) < 1} {
+        fail "QEMU_EXPECT_TIMEOUT must be a positive integer"
+    }
+    set timeout $env(QEMU_EXPECT_TIMEOUT)
 }
+
+if {$argc == 4 && [lindex $argv 0] eq "--fake"} {
+    set mode [lindex $argv 1]
+    set scenario [lindex $argv 2]
+    set fake_child [lindex $argv 3]
+    set child_command [list $fake_child $mode $scenario]
+} elseif {$argc == 6} {
+    set mode [lindex $argv 0]
+    set iso [lindex $argv 1]
+    set disk [lindex $argv 2]
+    set ovmf_code [lindex $argv 3]
+    set ovmf_vars [lindex $argv 4]
+    set accel [lindex $argv 5]
+    set cpu "max"
+    if {$accel eq "kvm"} {
+        set cpu "host"
+    }
+    set child_command [list qemu-system-x86_64 \
+        -machine "q35,accel=$accel" \
+        -cpu $cpu \
+        -m 2048 \
+        -smp 2 \
+        -nographic \
+        -no-reboot \
+        -boot "order=d,menu=on" \
+        -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
+        -drive "if=pflash,format=raw,file=$ovmf_vars" \
+        -drive "if=none,id=target,format=qcow2,file=$disk" \
+        -device "nvme,drive=target,serial=BLADE-QEMU-TEST" \
+        -drive "media=cdrom,readonly=on,file=$iso" \
+        -smbios "type=1,manufacturer=QEMU,product=Standard PC (Q35 + ICH9, 2009)"]
+} else {
+    fail "usage: qemu-boot.exp MODE ISO DISK OVMF_CODE OVMF_VARS ACCEL or --fake MODE SCENARIO CHILD"
+}
+
 if {$mode ne "rescue" && $mode ne "installer"} {
     fail "mode must be rescue or installer"
 }
 
-set qemu [list qemu-system-x86_64 \
-    -machine "q35,accel=$accel" \
-    -cpu $cpu \
-    -m 2048 \
-    -smp 2 \
-    -nographic \
-    -no-reboot \
-    -boot "order=d,menu=on" \
-    -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
-    -drive "if=pflash,format=raw,file=$ovmf_vars" \
-    -drive "if=none,id=target,format=qcow2,file=$disk" \
-    -device "nvme,drive=target,serial=BLADE-QEMU-TEST" \
-    -drive "media=cdrom,readonly=on,file=$iso" \
-    -smbios "type=1,manufacturer=QEMU,product=Standard PC (Q35 + ICH9, 2009)"]
-
 log_user 1
-spawn {*}$qemu
-wait_for_boot_menu
+if {[catch {spawn {*}$child_command} spawn_error]} {
+    fail "unable to spawn child: $spawn_error"
+}
+set child_started 1
+
+expect_transition {QEMU serial rescue test} \
+    "timed out waiting for the archiso boot menu" \
+    "child exited before the archiso boot menu"
 
 if {$mode eq "rescue"} {
     select_from_end 0
-    expect {
-        -re {root@archiso[^#]*#} {}
-        timeout { fail "QEMU serial rescue did not reach a root shell" }
-        eof { fail "QEMU exited before the rescue root shell" }
-    }
-    send -- "tr ' ' '\\n' </proc/cmdline | grep -vx 'blade.test=1' | paste -sd' ' - >/tmp/no-test\r"
-    expect -re {root@archiso[^#]*#}
-    send -- "BLADE_TEST=1 BLADE_FAILURE_SHELL=0 CMDLINE_FILE=/tmp/no-test /usr/local/bin/blade-install\r"
-    expect {
-        -re {unsupported physical platform} {}
-        timeout { fail "QEMU bypass was not rejected without blade.test=1" }
-        eof { fail "QEMU exited before the missing-flag rejection" }
-    }
-    expect -re {root@archiso[^#]*#}
+    expect_transition {root@archiso[^#]*#} \
+        "QEMU serial rescue did not reach a root shell" \
+        "child exited before the rescue root shell"
+    send_checked "tr ' ' '\\n' </proc/cmdline | grep -vx 'blade.test=1' | paste -sd' ' - >/tmp/no-test\r" \
+        "missing-flag fixture command"
+    expect_transition {root@archiso[^#]*#} \
+        "rescue shell did not finish the missing-flag fixture command" \
+        "child exited during the missing-flag fixture command"
+    send_checked "BLADE_TEST=1 BLADE_FAILURE_SHELL=0 CMDLINE_FILE=/tmp/no-test /usr/local/bin/blade-install\r" \
+        "missing-flag installer invocation"
+    expect_transition {unsupported physical platform} \
+        "QEMU bypass was not rejected without blade.test=1" \
+        "child exited before the missing-flag rejection"
+    expect_transition {root@archiso[^#]*#} \
+        "rescue shell did not return after the missing-flag rejection" \
+        "child exited before returning to the rescue shell"
 } else {
     select_from_end 1
-    expect {
-        -re {Razer Blade Arch Linux Installer} {}
-        timeout { fail "serial installer banner was not displayed" }
-        eof { fail "QEMU exited before the installer banner" }
-    }
-    expect {
-        -re {Safe installation targets:} {}
-        timeout { fail "installer did not enumerate the disposable NVMe disk" }
-        eof { fail "QEMU exited before disk selection" }
-    }
-    expect -re {Select a target number:}
-    send -- "1\r"
-    expect -re {Hostname \[[^]]+\]:}
-    send -- "\r"
-    expect -re {Local username:}
-    send -- "qemutest\r"
-    expect -re {Password:}
-    send -- "qemu-test-password\r"
-    expect -re {Confirm password:}
-    send -- "qemu-test-password\r"
-    expect {
-        -re {Type WIPE exactly} {}
-        timeout { fail "installer did not reach exact WIPE confirmation" }
-        eof { fail "QEMU exited before WIPE confirmation" }
-    }
-    send -- "CANCEL\r"
-    expect {
-        -re {Installation cancelled: WIPE was not entered exactly} {}
-        timeout { fail "CANCEL did not stop before disk modification" }
-        eof { fail "QEMU exited before cancellation was reported" }
-    }
+    expect_transition {Razer Blade Arch Linux Installer} \
+        "serial installer banner was not displayed" \
+        "child exited before the serial installer banner"
+    expect_transition {Safe installation targets:} \
+        "installer did not enumerate the disposable NVMe disk" \
+        "child exited before disk selection"
+    expect_transition {Select a target number:} \
+        "installer did not request a target number" \
+        "child exited before target selection input"
+    send_checked "1\r" "target selection"
+    expect_transition {Hostname \[[^]]+\]:} \
+        "installer did not request a hostname" \
+        "child exited before hostname input"
+    send_checked "\r" "default hostname"
+    expect_transition {Local username:} \
+        "installer did not request a username" \
+        "child exited before username input"
+    send_checked "qemutest\r" "test username"
+    expect_transition {Password:} \
+        "installer did not request a password" \
+        "child exited before password input"
+    send_checked "qemu-test-password\r" "test password"
+    expect_transition {Confirm password:} \
+        "installer did not request password confirmation" \
+        "child exited before password confirmation"
+    send_checked "qemu-test-password\r" "test password confirmation"
+    expect_transition {Type WIPE exactly} \
+        "installer did not reach exact WIPE confirmation" \
+        "child exited before WIPE confirmation"
+    send_checked "CANCEL\r" "non-destructive cancellation"
+    expect_transition {Installation cancelled: WIPE was not entered exactly} \
+        "CANCEL did not stop before disk modification" \
+        "child exited before cancellation was reported"
 }
 
-after 500
-send -- "\001x"
-expect eof
+after 100
+send_checked "\001x" "QEMU quit sequence"
+expect -i $spawn_id \
+    eof {} \
+    timeout { fail "timed out waiting for the child to exit" }
+set wait_result [wait -i $spawn_id]
+validate_wait_result $wait_result
 exit 0
