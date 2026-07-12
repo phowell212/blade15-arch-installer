@@ -77,19 +77,14 @@ boot_disk() {
 candidate_disks() {
   local boot
   local json
-  local live_mount=${LIVE_BOOT_MOUNT:-/run/archiso/bootmnt}
 
   boot=$(boot_disk)
   if ! json=$(_lsblk_json); then
     die "Unable to enumerate disks"
   fi
 
-  if ! jq -er --arg boot "$boot" --arg live "$live_mount" '
+  if ! jq -er --arg boot "$boot" '
     def subtree: ., (.children[]? | subtree);
-    def allowed_mount($mount):
-      $mount == null
-      or $mount == $live
-      or ($mount | startswith($live + "/"));
     .blockdevices[]
     | select(.type == "disk")
     | select(.rm == false)
@@ -97,7 +92,7 @@ candidate_disks() {
     | select(
         [subtree
           | (.mountpoints // [])[]?
-          | select(allowed_mount(.) | not)]
+          | select(. != null and . != "")]
         | length == 0
       )
     | .path

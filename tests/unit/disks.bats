@@ -55,14 +55,13 @@ teardown() {
   [ "$status" -ne 0 ]
 }
 
-@test "disk mounted only below the live ISO mount remains eligible" {
+@test "non-boot disk mounted below the live ISO path is rejected" {
   local live_fixture="$BATS_TEST_TMPDIR/live-mount.json"
-  jq '.blockdevices[0].children[0].mountpoints = ["/run/archiso/bootmnt/cache"]' "$LSBLK_JSON_FILE" >"$live_fixture"
+  jq '.blockdevices[0].children[0].mountpoints = ["/run/archiso/bootmnt/extra"]' "$LSBLK_JSON_FILE" >"$live_fixture"
   LSBLK_JSON_FILE="$live_fixture"
 
-  run candidate_disks
-  [ "$status" -eq 0 ]
-  [ "$output" = /dev/nvme0n1 ]
+  run assert_safe_target /dev/nvme0n1
+  [ "$status" -ne 0 ]
 }
 
 @test "removable disks are rejected as targets" {
@@ -76,12 +75,8 @@ teardown() {
 
 @test "target assertion fails closed when disk enumeration later errors" {
   local malformed_fixture="$BATS_TEST_TMPDIR/malformed.json"
-  jq '(.blockdevices[0]
-      | .name = "sdc"
-      | .path = "/dev/sdc"
-      | .children = []
-      | .mountpoints = [42]) as $bad
-      | .blockdevices += [$bad]' "$LSBLK_JSON_FILE" >"$malformed_fixture"
+  cp "$LSBLK_JSON_FILE" "$malformed_fixture"
+  printf '%s\n' 'not-json' >>"$malformed_fixture"
   LSBLK_JSON_FILE="$malformed_fixture"
 
   run assert_safe_target /dev/nvme0n1
