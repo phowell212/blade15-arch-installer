@@ -320,16 +320,18 @@ verify_outputs() {
   fi
 
   yay_path="$PACKAGE_DIR/${manifest[yay_package]}"
-  if [[ -e "$yay_path" || -L "$yay_path" ]]; then
-    if [[ ! -f "$yay_path" || -L "$yay_path" ]]; then
-      die "local yay artifact is not a regular file: $yay_path"
-      return 1
-    fi
-    actual_sha=$(sha256sum "$yay_path" | awk '{print $1}')
-    if [[ "$actual_sha" != "${manifest[yay_package_sha256]}" ]]; then
-      die 'local yay package digest does not match build manifest'
-      return 1
-    fi
+  if [[ ! -e "$yay_path" && ! -L "$yay_path" ]]; then
+    die "local yay artifact is missing: $yay_path"
+    return 1
+  fi
+  if [[ ! -f "$yay_path" || -L "$yay_path" ]]; then
+    die "local yay artifact is not a regular file: $yay_path"
+    return 1
+  fi
+  actual_sha=$(sha256sum "$yay_path" | awk '{print $1}')
+  if [[ "$actual_sha" != "${manifest[yay_package_sha256]}" ]]; then
+    die 'local yay package digest does not match build manifest'
+    return 1
   fi
 }
 

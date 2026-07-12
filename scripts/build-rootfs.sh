@@ -165,13 +165,17 @@ sanitize_rootfs() {
   clear_build_directory "$ROOTFS_DIR/var/tmp"
 }
 
+write_package_manifest() {
+  LC_ALL=C arch-chroot "$ROOTFS_DIR" pacman -Q | LC_ALL=C sort >"$PACKAGE_MANIFEST"
+}
+
 write_manifests_and_archive() {
   local codex_installer_sha=$1
   local rootfs_sha
   local yay_package=$2
   local yay_sha
 
-  LC_ALL=C arch-chroot "$ROOTFS_DIR" pacman -Q | sort >"$PACKAGE_MANIFEST"
+  write_package_manifest
   yay_sha=$(sha256sum "$yay_package" | awk '{print $1}')
 
   tar --acls --xattrs --numeric-owner -C "$ROOTFS_DIR" -cpf - . |

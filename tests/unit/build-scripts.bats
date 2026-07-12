@@ -309,6 +309,67 @@ teardown() {
   [ "$status" -ne 0 ]
 }
 
+@test "build manifest verification rejects a missing named yay artifact" {
+  prepare_manifest_fixture
+  rm -f "$MANIFEST_FIXTURE/packages/yay-12.4.2-1-x86_64.pkg.tar.zst"
+
+  verify_manifest_fixture
+
+  [ "$status" -ne 0 ]
+}
+
+@test "build manifest verification rejects a symlinked named yay artifact" {
+  prepare_manifest_fixture
+  mv "$MANIFEST_FIXTURE/packages/yay-12.4.2-1-x86_64.pkg.tar.zst" \
+    "$MANIFEST_FIXTURE/packages/yay-decoy.pkg.tar.zst"
+  ln -s yay-decoy.pkg.tar.zst \
+    "$MANIFEST_FIXTURE/packages/yay-12.4.2-1-x86_64.pkg.tar.zst"
+
+  verify_manifest_fixture
+
+  [ "$status" -ne 0 ]
+}
+
+@test "package manifest producer pins C locale for both pacman query and sort" {
+  run bash -c '
+    export BLADE_DRY_RUN=1
+    source "$1" >/dev/null
+    fixture="$BUILD_DIR/task-5-producer-locale"
+    reset_build_directory "$fixture" >/dev/null
+    ROOTFS_DIR=$fixture/root
+    PACKAGE_MANIFEST=$fixture/target-packages.txt
+    locale_log=$fixture/locales.log
+    arch-chroot() {
+      printf "arch-chroot:%s\n" "${LC_ALL-}" >>"$locale_log"
+      printf "z-package 1\na-package 1\n"
+    }
+    sort() {
+      printf "sort:%s\n" "${LC_ALL-}" >>"$locale_log"
+      command sort "$@"
+    }
+
+    set +e
+    write_package_manifest
+    producer_status=$?
+    set -e
+    textual_status=0
+    grep -F \
+      "LC_ALL=C arch-chroot \"\$ROOTFS_DIR\" pacman -Q | LC_ALL=C sort >\"\$PACKAGE_MANIFEST\"" \
+      "$1" >/dev/null || textual_status=$?
+    behavior_status=0
+    grep -Fx "arch-chroot:C" "$locale_log" >/dev/null || behavior_status=1
+    grep -Fx "sort:C" "$locale_log" >/dev/null || behavior_status=1
+    [[ $(cat "$PACKAGE_MANIFEST") == "$(printf "a-package 1\nz-package 1")" ]] ||
+      behavior_status=1
+
+    reset_build_directory "$fixture" >/dev/null
+    rmdir "$fixture"
+    [[ $producer_status -eq 0 && $textual_status -eq 0 && $behavior_status -eq 0 ]]
+  ' _ "$BUILD_ROOTFS"
+
+  [ "$status" -eq 0 ]
+}
+
 @test "build manifest rejects duplicate missing and malformed keys" {
   local duplicate_status
   local malformed_status
