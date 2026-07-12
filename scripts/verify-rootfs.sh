@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/lib/build-common.sh"
 
 ROOTFS_DIR="$BUILD_DIR/rootfs"
+PACKAGE_DIR="$BUILD_DIR/packages"
 PAYLOAD_DIR="$BUILD_DIR/payload"
 PAYLOAD_PATH="$PAYLOAD_DIR/rootfs.tar.zst"
 PAYLOAD_CHECKSUM="$PAYLOAD_DIR/rootfs.tar.zst.sha256"
@@ -23,11 +24,50 @@ print_plan() {
     'verify enabled: NetworkManager switcheroo-control power-profiles-daemon thermald fstrim.timer blade-firstboot-gpu.service' \
     'verify /etc/crypttab is absent' \
     'verify no credentials, auth/session files, SSH host keys, or machine-id' \
+    'verify no NetworkManager, iwd, or wpa_supplicant network secrets' \
     'verify CODEX_HOME is not exported to users' \
     'verify yay --version and codex --version in arch-chroot' \
     "verify codex version contains $CODEX_RELEASE" \
     "verify payload checksum: $PAYLOAD_CHECKSUM" \
     "verify build manifest: $BUILD_MANIFEST"
+}
+
+verify_no_network_secrets() {
+  local directory
+  local secret
+  local -a secret_directories=(
+    "$ROOTFS_DIR/etc/NetworkManager/system-connections"
+    "$ROOTFS_DIR/var/lib/iwd"
+    "$ROOTFS_DIR/etc/iwd"
+    "$ROOTFS_DIR/etc/wpa_supplicant"
+  )
+
+  for directory in "${secret_directories[@]}"; do
+    [[ -d "$directory" ]] || continue
+    secret=$(find "$directory" -mindepth 1 -print -quit)
+    if [[ -n "$secret" ]]; then
+      die "network secret/state file found: $secret"
+      return 1
+    fi
+    if [[ $(stat -c '%a' "$directory") != 700 ]]; then
+      die "network secret directory must have mode 0700: $directory"
+      return 1
+    fi
+  done
+
+  directory="$ROOTFS_DIR/var/lib/NetworkManager"
+  if [[ -d "$directory" ]]; then
+    secret=$(find "$directory" -mindepth 1 -maxdepth 1 \
+      \( -name 'secret_key*' -o -name 'secret-key*' \) -print -quit)
+    if [[ -n "$secret" ]]; then
+      die "NetworkManager secret-key state found: $secret"
+      return 1
+    fi
+    if [[ $(stat -c '%a' "$directory") != 700 ]]; then
+      die "NetworkManager state directory must have mode 0700: $directory"
+      return 1
+    fi
+  fi
 }
 
 verify_required_files() {
@@ -65,7 +105,9 @@ verify_packages() {
   local -a group_members
   local -a packages
 
-  mapfile -t packages < <(read_target_packages)
+  if ! read_target_packages packages; then
+    return 1
+  fi
   packages+=(yay)
   for package in "${packages[@]}"; do
     if arch-chroot "$ROOTFS_DIR" pacman -Q "$package" >/dev/null 2>&1; then
@@ -145,6 +187,7 @@ verify_accounts_and_credentials() {
     >/dev/null 2>&1; then
     die 'CODEX_HOME is exported to installed users'
   fi
+  verify_no_network_secrets
 }
 
 verify_codex_permissions() {
@@ -159,8 +202,105 @@ verify_codex_permissions() {
   [[ -x "$ROOTFS_DIR/usr/local/bin/codex" ]] || die 'global Codex executable is missing'
 }
 
+load_build_manifest() {
+  local destination_name=${1-}
+  local key
+  local line
+  local required_key
+  local value
+  local -a required_keys=(
+    project_slug
+    codex_release
+    codex_installer_url
+    codex_installer_sha256
+    yay_aur_url
+    yay_aur_commit
+    yay_package
+    yay_package_sha256
+    rootfs_sha256
+  )
+
+  if [[ ! "$destination_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+    die 'load_build_manifest requires an associative array variable name'
+    return 1
+  fi
+  local -n destination=$destination_name
+  destination=()
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ ! "$line" =~ ^([a-z0-9_]+)=([^[:space:]]+)$ ]]; then
+      die "malformed build manifest line: $line"
+      return 1
+    fi
+    key=${BASH_REMATCH[1]}
+    value=${BASH_REMATCH[2]}
+    case "$key" in
+      project_slug | codex_release | codex_installer_url | \
+        codex_installer_sha256 | yay_aur_url | yay_aur_commit | \
+        yay_package | yay_package_sha256 | rootfs_sha256) ;;
+      *)
+        die "unknown build manifest key: $key"
+        return 1
+        ;;
+    esac
+    if [[ ${destination[$key]+present} ]]; then
+      die "duplicate build manifest key: $key"
+      return 1
+    fi
+    destination[$key]=$value
+  done <"$BUILD_MANIFEST"
+
+  for required_key in "${required_keys[@]}"; do
+    if [[ ! ${destination[$required_key]+present} ]]; then
+      die "missing build manifest key: $required_key"
+      return 1
+    fi
+  done
+
+  if [[ ${destination[project_slug]} != "$PROJECT_SLUG" ||
+    ${destination[codex_release]} != "$CODEX_RELEASE" ||
+    ${destination[codex_installer_url]} != https://chatgpt.com/codex/install.sh ||
+    ${destination[codex_installer_sha256]} != "$CODEX_INSTALLER_SHA256" ||
+    ${destination[yay_aur_url]} != https://aur.archlinux.org/yay.git ||
+    ${destination[yay_aur_commit]} != "$YAY_AUR_COMMIT" ]]; then
+    die 'build manifest pinned inputs do not match build configuration'
+    return 1
+  fi
+  if [[ ! ${destination[yay_package]} =~ ^yay-[0-9][a-zA-Z0-9._+-]*\.pkg\.tar\.zst$ ]]; then
+    die 'malformed yay package name in build manifest'
+    return 1
+  fi
+  for key in codex_installer_sha256 yay_package_sha256 rootfs_sha256; do
+    if [[ ! ${destination[$key]} =~ ^[0-9a-f]{64}$ ]]; then
+      die "malformed build manifest digest: $key"
+      return 1
+    fi
+  done
+}
+
+verify_package_manifest() {
+  local actual_manifest
+
+  mkdir -p "$BUILD_DIR"
+  assert_safe_build_child "$BUILD_DIR/.target-packages.verify" >/dev/null
+  actual_manifest=$(mktemp "$BUILD_DIR/.target-packages.verify.XXXXXX")
+  if ! LC_ALL=C arch-chroot "$ROOTFS_DIR" pacman -Q | LC_ALL=C sort >"$actual_manifest"; then
+    rm -f "$actual_manifest"
+    die 'failed to generate fresh target package manifest'
+    return 1
+  fi
+  if ! cmp -s -- "$actual_manifest" "$PACKAGE_MANIFEST"; then
+    rm -f "$actual_manifest"
+    die 'target-packages.txt does not match fresh pacman -Q output'
+    return 1
+  fi
+  rm -f "$actual_manifest"
+}
+
 verify_outputs() {
-  local manifest_sha
+  local actual_sha
+  local yay_path
+  local -A manifest=()
 
   [[ -s "$PAYLOAD_PATH" ]] || die "missing rootfs payload: $PAYLOAD_PATH"
   [[ -s "$PAYLOAD_CHECKSUM" ]] || die "missing payload checksum: $PAYLOAD_CHECKSUM"
@@ -170,20 +310,39 @@ verify_outputs() {
     cd "$PAYLOAD_DIR"
     sha256sum --check rootfs.tar.zst.sha256
   )
-  manifest_sha=$(awk -F= '$1 == "codex_installer_sha256" {print $2}' "$BUILD_MANIFEST")
-  [[ "$manifest_sha" == "$CODEX_INSTALLER_SHA256" ]] ||
-    die 'build manifest does not record the pinned Codex installer digest'
-  grep -Fx "codex_release=$CODEX_RELEASE" "$BUILD_MANIFEST" >/dev/null ||
-    die 'build manifest does not record the pinned Codex release'
-  grep -Fx "yay_aur_commit=$YAY_AUR_COMMIT" "$BUILD_MANIFEST" >/dev/null ||
-    die 'build manifest does not record the pinned yay commit'
+  load_build_manifest manifest || return
+  verify_package_manifest || return
+
+  actual_sha=$(sha256sum "$PAYLOAD_PATH" | awk '{print $1}')
+  if [[ "$actual_sha" != "${manifest[rootfs_sha256]}" ]]; then
+    die 'rootfs payload digest does not match build manifest'
+    return 1
+  fi
+
+  yay_path="$PACKAGE_DIR/${manifest[yay_package]}"
+  if [[ -e "$yay_path" || -L "$yay_path" ]]; then
+    if [[ ! -f "$yay_path" || -L "$yay_path" ]]; then
+      die "local yay artifact is not a regular file: $yay_path"
+      return 1
+    fi
+    actual_sha=$(sha256sum "$yay_path" | awk '{print $1}')
+    if [[ "$actual_sha" != "${manifest[yay_package_sha256]}" ]]; then
+      die 'local yay package digest does not match build manifest'
+      return 1
+    fi
+  fi
 }
 
 main() {
   local codex_version
   local yay_version
+  # shellcheck disable=SC2034
+  local -a target_packages
 
   load_build_config
+  if ! read_target_packages target_packages; then
+    return 1
+  fi
   if is_dry_run; then
     print_plan
     return 0

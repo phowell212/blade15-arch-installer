@@ -126,14 +126,28 @@ require_privileged_arch() {
 }
 
 read_target_packages() {
+  local destination_name=${1-}
   local package
+  local -a entries=()
 
-  [[ -r "$TARGET_PACKAGE_LIST" ]] ||
+  if [[ ! "$destination_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+    die 'read_target_packages requires an array variable name'
+    return 1
+  fi
+  local -n destination=$destination_name
+  destination=()
+  if [[ ! -r "$TARGET_PACKAGE_LIST" ]]; then
     die "missing target package list: $TARGET_PACKAGE_LIST"
+    return 1
+  fi
   while IFS= read -r package || [[ -n "$package" ]]; do
     [[ -n "$package" && "$package" != \#* ]] || continue
-    [[ "$package" =~ ^[a-z0-9@._+-]+$ ]] ||
+    if [[ ! "$package" =~ ^[a-z0-9@._+-]+$ ]]; then
       die "unsafe package name in target list: $package"
-    printf '%s\n' "$package"
+      return 1
+    fi
+    entries+=("$package")
   done <"$TARGET_PACKAGE_LIST"
+  # shellcheck disable=SC2034
+  destination=("${entries[@]}")
 }

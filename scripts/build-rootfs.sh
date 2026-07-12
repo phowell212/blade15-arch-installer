@@ -34,6 +34,7 @@ print_plan() {
     'verify CODEX_HOME is not exported to users' \
     'lock root account' \
     'verify no baked regular users, passwords, SSH host keys, or machine-id' \
+    'remove NetworkManager, iwd, and wpa_supplicant network secrets' \
     'enable NetworkManager switcheroo-control power-profiles-daemon thermald fstrim.timer blade-firstboot-gpu.service' \
     'disable gdm.service' \
     'set-default multi-user.target' \
@@ -41,6 +42,27 @@ print_plan() {
     "write $PAYLOAD_CHECKSUM" \
     "write $PACKAGE_MANIFEST" \
     "write $BUILD_MANIFEST"
+}
+
+sanitize_network_secrets() {
+  local directory
+  local -a secret_directories=(
+    "$ROOTFS_DIR/etc/NetworkManager/system-connections"
+    "$ROOTFS_DIR/var/lib/iwd"
+    "$ROOTFS_DIR/etc/iwd"
+    "$ROOTFS_DIR/etc/wpa_supplicant"
+  )
+
+  for directory in "${secret_directories[@]}"; do
+    clear_build_directory "$directory"
+    install -d -o root -g root -m0700 "$directory"
+  done
+
+  directory="$ROOTFS_DIR/var/lib/NetworkManager"
+  assert_safe_build_child "$directory" >/dev/null
+  install -d -o root -g root -m0700 "$directory"
+  find "$directory" -mindepth 1 -maxdepth 1 \
+    \( -name 'secret_key*' -o -name 'secret-key*' \) -delete
 }
 
 remove_codex_installer() {
@@ -136,6 +158,7 @@ sanitize_rootfs() {
   rm -f -- "$ROOTFS_DIR/etc/crypttab" \
     "$ROOTFS_DIR/etc/machine-id" "$ROOTFS_DIR/var/lib/dbus/machine-id" \
     "$ROOTFS_DIR"/etc/ssh/ssh_host_*
+  sanitize_network_secrets
   clear_build_directory "$ROOTFS_DIR/var/cache/pacman/pkg"
   clear_build_directory "$ROOTFS_DIR/var/log"
   clear_build_directory "$ROOTFS_DIR/tmp"
@@ -178,6 +201,9 @@ main() {
   local -a yay_packages
 
   load_build_config
+  if ! read_target_packages target_packages; then
+    return 1
+  fi
   if is_dry_run; then
     print_plan
     return 0
@@ -197,7 +223,6 @@ main() {
     die "expected one local yay package, found ${#yay_packages[@]}"
   yay_package=${yay_packages[0]}
 
-  mapfile -t target_packages < <(read_target_packages)
   [[ ${#target_packages[@]} -gt 0 ]] || die 'target package list is empty'
   reset_build_directory "$ROOTFS_DIR"
   reset_build_directory "$PAYLOAD_DIR"
