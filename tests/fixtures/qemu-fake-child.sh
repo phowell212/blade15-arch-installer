@@ -13,7 +13,7 @@ case "$scenario" in
     printf 'QEMU serial rescue test\n'
     exit 0
     ;;
-  success | nonzero | signal | missing-target-setting | missing-default-setting) ;;
+  success | nonzero | signal | missing-target-setting | missing-default-setting | stock-serial-getty) ;;
   *)
     printf 'unknown fake scenario: %s\n' "$scenario" >&2
     exit 64
@@ -23,6 +23,11 @@ esac
 printf 'QEMU serial rescue test\n'
 IFS= read -r _
 case "$scenario" in
+  stock-serial-getty)
+    printf 'archiso login: '
+    sleep 5
+    exit 0
+    ;;
   missing-target-setting)
     printf 'TARGET_MOUNT is required\n'
     sleep 5

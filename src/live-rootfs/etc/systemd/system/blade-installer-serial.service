@@ -1,7 +1,7 @@
 [Unit]
 Description=QEMU-only serial Razer Blade installer test
 After=dev-ttyS0.device
-Conflicts=getty@ttyS0.service blade-installer.service
+Conflicts=serial-getty@ttyS0.service blade-installer.service
 ConditionKernelCommandLine=blade.test=1
 ConditionKernelCommandLine=!blade.noinstaller=1
 StartLimitIntervalSec=0

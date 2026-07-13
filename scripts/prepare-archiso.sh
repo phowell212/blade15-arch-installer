@@ -17,7 +17,7 @@ SAFE_BOOT_ARGS='systemd.unit=multi-user.target modprobe.blacklist=nouveau,nvidia
 PHYSICAL_INSTALLER_BOOT_ARGS='systemd.mask=getty@tty1.service'
 RESCUE_LABEL='Rescue shell (no installer)'
 QEMU_TEST_LABEL='QEMU serial installer test'
-QEMU_TEST_ARGS='blade.test=1 console=tty0 console=ttyS0,115200n8'
+QEMU_TEST_ARGS='blade.test=1 console=tty0 console=ttyS0,115200n8 systemd.mask=serial-getty@ttyS0.service'
 QEMU_RESCUE_LABEL='QEMU serial rescue test'
 
 print_plan() {

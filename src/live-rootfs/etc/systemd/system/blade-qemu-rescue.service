@@ -1,7 +1,7 @@
 [Unit]
 Description=QEMU-only serial rescue shell test
 After=dev-ttyS0.device
-Conflicts=getty@ttyS0.service blade-installer.service blade-installer-serial.service
+Conflicts=serial-getty@ttyS0.service blade-installer.service blade-installer-serial.service
 ConditionKernelCommandLine=blade.test=1
 ConditionKernelCommandLine=blade.noinstaller=1
 

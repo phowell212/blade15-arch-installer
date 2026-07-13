@@ -13,6 +13,7 @@ SAFE_UNIT_ARG='systemd.unit=multi-user.target'
 SAFE_BLACKLIST_ARG='modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'
 OFFLINE_TIME_MASK_ARG='systemd.mask=systemd-time-wait-sync.service'
 PHYSICAL_TTY_MASK_ARG='systemd.mask=getty@tty1.service'
+QEMU_SERIAL_GETTY_MASK_ARG='systemd.mask=serial-getty@ttyS0.service'
 RESCUE_LABEL='Rescue shell (no installer)'
 QEMU_TEST_LABEL='QEMU serial installer test'
 QEMU_RESCUE_LABEL='QEMU serial rescue test'
@@ -288,6 +289,8 @@ validate_route_kernel_args() {
     "$description" || return
   forbid_kernel_token_near_match "$arguments" "$PHYSICAL_TTY_MASK_ARG" \
     "$description" || return
+  forbid_kernel_token_near_match "$arguments" "$QEMU_SERIAL_GETTY_MASK_ARG" \
+    "$description" || return
   require_kernel_token "$arguments" "$SAFE_UNIT_ARG" "$description" || return
   require_kernel_token "$arguments" "$SAFE_BLACKLIST_ARG" "$description" || return
   require_kernel_token "$arguments" "$OFFLINE_TIME_MASK_ARG" "$description" || return
@@ -295,6 +298,7 @@ validate_route_kernel_args() {
   case "$route" in
     normal)
       require_kernel_token "$arguments" "$PHYSICAL_TTY_MASK_ARG" "$description" || return
+      forbid_kernel_token "$arguments" "$QEMU_SERIAL_GETTY_MASK_ARG" "$description" || return
       forbid_kernel_token "$arguments" "$TEST_ARG" "$description" || return
       forbid_kernel_token "$arguments" 'blade.noinstaller=1' "$description" || return
       forbid_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
@@ -302,6 +306,7 @@ validate_route_kernel_args() {
       ;;
     rescue)
       forbid_kernel_token "$arguments" "$PHYSICAL_TTY_MASK_ARG" "$description" || return
+      forbid_kernel_token "$arguments" "$QEMU_SERIAL_GETTY_MASK_ARG" "$description" || return
       require_kernel_token "$arguments" 'blade.noinstaller=1' "$description" || return
       forbid_kernel_token "$arguments" "$TEST_ARG" "$description" || return
       forbid_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
@@ -309,6 +314,7 @@ validate_route_kernel_args() {
       ;;
     qemu-installer)
       forbid_kernel_token "$arguments" "$PHYSICAL_TTY_MASK_ARG" "$description" || return
+      require_kernel_token "$arguments" "$QEMU_SERIAL_GETTY_MASK_ARG" "$description" || return
       require_kernel_token "$arguments" "$TEST_ARG" "$description" || return
       require_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
       require_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return
@@ -316,6 +322,7 @@ validate_route_kernel_args() {
       ;;
     qemu-rescue)
       forbid_kernel_token "$arguments" "$PHYSICAL_TTY_MASK_ARG" "$description" || return
+      require_kernel_token "$arguments" "$QEMU_SERIAL_GETTY_MASK_ARG" "$description" || return
       require_kernel_token "$arguments" "$TEST_ARG" "$description" || return
       require_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
       require_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return
@@ -531,12 +538,16 @@ verify_service_units() {
 
   require_unit_line "$serial" 'ConditionKernelCommandLine=blade.test=1' || return
   require_unit_line "$serial" 'ConditionKernelCommandLine=!blade.noinstaller=1' || return
+  require_unit_line "$serial" \
+    'Conflicts=serial-getty@ttyS0.service blade-installer.service' || return
   require_unit_line "$serial" 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' || return
   require_unit_line "$serial" 'ExecStart=/usr/local/bin/blade-install' || return
   require_unit_line "$serial" 'TTYPath=/dev/ttyS0' || return
 
   require_unit_line "$rescue" 'ConditionKernelCommandLine=blade.test=1' || return
   require_unit_line "$rescue" 'ConditionKernelCommandLine=blade.noinstaller=1' || return
+  require_unit_line "$rescue" \
+    'Conflicts=serial-getty@ttyS0.service blade-installer.service blade-installer-serial.service' || return
   require_unit_line "$rescue" 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' || return
   require_unit_line "$rescue" \
     'ExecStart=-/usr/bin/agetty --autologin root --noclear 115200 ttyS0 vt100' || return

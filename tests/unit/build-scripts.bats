@@ -656,7 +656,7 @@ teardown() {
   [[ "$output" == *'patch Syslinux default entry'* ]]
   [[ "$output" == *'systemd.unit=multi-user.target modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'* ]]
   [[ "$output" == *'Rescue shell (no installer)'*'blade.noinstaller=1'* ]]
-  [[ "$output" == *'QEMU serial installer test'*'blade.test=1'*'console=ttyS0,115200n8'* ]]
+  [[ "$output" == *'QEMU serial installer test'*'blade.test=1'*'console=ttyS0,115200n8'*'systemd.mask=serial-getty@ttyS0.service'* ]]
   [[ "$output" != *'/run/blade-installer'* ]]
 }
 
@@ -870,8 +870,10 @@ teardown() {
   grep -Fx 'TTYPath=/dev/ttyS0' "$serial"
   grep -Fx 'ConditionKernelCommandLine=blade.test=1' "$serial"
   grep -Fx 'ConditionKernelCommandLine=!blade.noinstaller=1' "$serial"
+  grep -Fx 'Conflicts=serial-getty@ttyS0.service blade-installer.service' "$serial"
   grep -Fx 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' "$serial"
   grep -Fx 'ConditionKernelCommandLine=blade.noinstaller=1' "$rescue"
+  grep -Fx 'Conflicts=serial-getty@ttyS0.service blade-installer.service blade-installer-serial.service' "$rescue"
   grep -Fx 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' "$rescue"
 }
 
@@ -952,6 +954,17 @@ teardown() {
       --fake installer "$scenario" "$QEMU_FAKE_CHILD"
     [ "$status" -ne 0 ]
     [[ "$output" == *"installer reported missing runtime setting: $expected"* ]]
+  done
+}
+
+@test "Expect fails immediately when the stock serial getty owns ttyS0" {
+  local mode
+
+  for mode in installer rescue; do
+    run env QEMU_EXPECT_TIMEOUT=1 expect "$QEMU_EXPECT" \
+      --fake "$mode" stock-serial-getty "$QEMU_FAKE_CHILD"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'stock serial getty claimed ttyS0 before the selected QEMU route'* ]]
   done
 }
 
@@ -1283,6 +1296,107 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "artifact route verification enforces QEMU serial-getty mask ownership route by route" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    token=systemd.mask=serial-getty@ttyS0.service
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+
+    mutate_route() {
+      local file=$1
+      local kind=$2
+      local route=$3
+      local mutation=$4
+      local value=$5
+      local id
+      local label
+      case "$route" in
+        normal) id=archlinux; label=arch ;;
+        rescue) id=blade-rescue; label=blade-rescue ;;
+        qemu-installer) id=blade-qemu-test; label=blade-qemu-test ;;
+        qemu-rescue) id=blade-qemu-rescue; label=blade-qemu-rescue ;;
+      esac
+      if [[ $kind == grub ]]; then
+        case "$mutation" in
+          remove) sed -i "/--id .$id./,/^}/s| $value||" "$file" ;;
+          duplicate) sed -i "/--id .$id./,/^}/s| $value| $value $value|" "$file" ;;
+          near-match) sed -i "/--id .$id./,/^}/s| $value| x$value|" "$file" ;;
+          add) sed -i "/--id .$id./,/^}/s|^\([[:space:]]*linux .*/vmlinuz-linux.*\)$|\1 $value|" "$file" ;;
+        esac
+      else
+        case "$mutation" in
+          remove) sed -i "/^LABEL $label$/,/^LABEL /s| $value||" "$file" ;;
+          duplicate) sed -i "/^LABEL $label$/,/^LABEL /s| $value| $value $value|" "$file" ;;
+          near-match) sed -i "/^LABEL $label$/,/^LABEL /s| $value| x$value|" "$file" ;;
+          add) sed -i "/^LABEL $label$/,/^LABEL /s/^APPEND .*/& $value/" "$file" ;;
+        esac
+      fi
+    }
+
+    verify_changed_file() {
+      local file=$1
+      local kind=$2
+      if [[ $kind == grub ]]; then
+        verify_grub_stanzas "$file"
+      else
+        verify_syslinux_stanzas "$file"
+      fi
+    }
+
+    verify_boot_entries || exit $?
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      for route in qemu-installer qemu-rescue; do
+        for mutation in remove duplicate near-match; do
+          cp "$file" "$file.clean"
+          mutate_route "$file" "$kind" "$route" "$mutation" "$token"
+          set +e
+          verify_changed_file "$file" "$kind" >/dev/null 2>&1
+          verify_status=$?
+          set -e
+          mv "$file.clean" "$file"
+          [[ $verify_status -ne 0 ]] || {
+            printf "accepted %s serial-getty mask on %s route in %s\n" \
+              "$mutation" "$route" "$spec" >&2
+            exit 1
+          }
+        done
+      done
+
+      for route in normal rescue; do
+        for invalid in "$token" "$token $token" "x$token"; do
+          cp "$file" "$file.clean"
+          mutate_route "$file" "$kind" "$route" add "$invalid"
+          set +e
+          verify_changed_file "$file" "$kind" >/dev/null 2>&1
+          verify_status=$?
+          set -e
+          mv "$file.clean" "$file"
+          [[ $verify_status -ne 0 ]] || {
+            printf "accepted misplaced serial-getty mask %s on %s route in %s\n" \
+              "$invalid" "$route" "$spec" >&2
+            exit 1
+          }
+        done
+      done
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
+  [ "$status" -eq 0 ]
+}
+
 @test "artifact boot verification rejects a missing rescue guard in every active config" {
   prepare_built_profile_fixture
 
@@ -1337,7 +1451,7 @@ teardown() {
     for spec in "${files[@]}"; do
       file=${spec%:*}
       kind=${spec##*:}
-      for guard in blade.test=1 console=ttyS0,115200n8; do
+      for guard in blade.test=1 console=ttyS0,115200n8 systemd.mask=serial-getty@ttyS0.service; do
         cp "$file" "$file.clean"
         if [[ $kind == grub ]]; then
           sed -i "/--id .blade-qemu-test./,/^}/s/ $guard//" "$file"
@@ -1455,10 +1569,12 @@ teardown() {
       "blade-installer.service|TTYPath=/dev/tty1"
       "blade-installer-serial.service|ConditionKernelCommandLine=blade.test=1"
       "blade-installer-serial.service|ConditionKernelCommandLine=!blade.noinstaller=1"
+      "blade-installer-serial.service|Conflicts=serial-getty@ttyS0.service blade-installer.service"
       "blade-installer-serial.service|ExecCondition=/usr/local/bin/blade-qemu-serial-gate"
       "blade-installer-serial.service|TTYPath=/dev/ttyS0"
       "blade-qemu-rescue.service|ConditionKernelCommandLine=blade.test=1"
       "blade-qemu-rescue.service|ConditionKernelCommandLine=blade.noinstaller=1"
+      "blade-qemu-rescue.service|Conflicts=serial-getty@ttyS0.service blade-installer.service blade-installer-serial.service"
       "blade-qemu-rescue.service|ExecCondition=/usr/local/bin/blade-qemu-serial-gate"
     )
     for spec in "${specs[@]}"; do

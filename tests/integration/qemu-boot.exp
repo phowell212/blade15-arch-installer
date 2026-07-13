@@ -29,11 +29,17 @@ proc expect_transition {pattern timeout_message eof_message} {
             -re {(TARGET|DEFAULT)_[[:alnum:]_]+ is required} {
                 fail "installer reported missing runtime setting: $expect_out(0,string)"
             } \
+            -re {archiso login:} {
+                fail "stock serial getty claimed ttyS0 before the selected QEMU route"
+            } \
             -re $pattern { return } \
             timeout [list fail $timeout_message] \
             eof [list fail $eof_message]
     } else {
         expect -i $spawn_id \
+            -re {archiso login:} {
+                fail "stock serial getty claimed ttyS0 before the selected QEMU route"
+            } \
             -re $pattern { return } \
             timeout [list fail $timeout_message] \
             eof [list fail $eof_message]
