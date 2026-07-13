@@ -17,7 +17,7 @@ install_tools() {
     return 1
   fi
 
-  pacman -Syu --needed --noconfirm bats git go shellcheck shfmt
+  pacman -Syu --needed --noconfirm bats expect git go jq shellcheck shfmt
   GOBIN=/usr/local/bin go install \
     "github.com/rhysd/actionlint/cmd/actionlint@v$ACTIONLINT_VERSION"
 }
