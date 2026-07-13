@@ -105,7 +105,7 @@ if {$argc == 4 && [lindex $argv 0] eq "--fake"} {
         -drive "if=none,id=target,format=qcow2,file=$disk" \
         -device "nvme,drive=target,serial=BLADE-QEMU-TEST" \
         -drive "media=cdrom,readonly=on,file=$iso" \
-        -smbios "type=1,manufacturer=QEMU,product=Standard PC (Q35 + ICH9, 2009)"]
+        -smbios "type=1,manufacturer=QEMU,product=Standard PC (Q35 + ICH9)"]
 } else {
     fail "usage: qemu-boot.exp MODE ISO DISK OVMF_CODE OVMF_VARS ACCEL or --fake MODE SCENARIO CHILD"
 }

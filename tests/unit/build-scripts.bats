@@ -767,7 +767,7 @@ teardown() {
   [ -x "$expect_script" ]
   grep -F 'qemu-system-x86_64' "$expect_script"
   grep -F 'manufacturer=QEMU' "$expect_script"
-  grep -F 'product=Standard PC (Q35 + ICH9, 2009)' "$expect_script"
+  grep -F 'product=Standard PC (Q35 + ICH9)' "$expect_script"
   grep -F 'QEMU serial rescue test' "$expect_script"
   grep -F 'BLADE_TEST=1' "$expect_script"
   grep -F 'unsupported physical platform' "$expect_script"
