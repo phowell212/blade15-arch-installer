@@ -552,6 +552,34 @@ teardown() {
   [[ "$output" == *'verify codex version contains 0.144.1'* ]]
 }
 
+@test "Codex verifier resolves the installer's absolute symlink inside the target" {
+  local fixture="$REPO_ROOT/build/task-5-codex-symlink"
+
+  mkdir -p "$fixture/opt/codex/releases/current" "$fixture/usr/local/bin"
+  printf '#!/bin/sh\nexit 0\n' >"$fixture/opt/codex/releases/current/codex"
+  chmod 0755 "$fixture/opt/codex/releases/current/codex"
+  ln -s /opt/codex/releases/current/codex "$fixture/usr/local/bin/codex"
+
+  run bash -c '
+    export BLADE_DRY_RUN=1
+    source "$1" >/dev/null
+    ROOTFS_DIR=$2
+    find() { :; }
+    arch-chroot() {
+      [[ $2 == test && $3 == -x && $4 == /usr/local/bin/codex ]]
+    }
+    verify_codex_permissions
+  ' _ "$VERIFY_ROOTFS" "$fixture"
+  codex_status=$status
+
+  rm -f "$fixture/usr/local/bin/codex" "$fixture/opt/codex/releases/current/codex"
+  rmdir "$fixture/usr/local/bin" "$fixture/usr/local" "$fixture/usr" \
+    "$fixture/opt/codex/releases/current" "$fixture/opt/codex/releases" \
+    "$fixture/opt/codex" "$fixture/opt" "$fixture"
+
+  [ "$codex_status" -eq 0 ]
+}
+
 @test "archiso dry-run plans a complete boot-safe releng profile" {
   run env BLADE_DRY_RUN=1 "$PREPARE_ARCHISO"
 

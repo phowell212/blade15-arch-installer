@@ -88,7 +88,8 @@ verify_required_files() {
   )
 
   for path in "${required_paths[@]}"; do
-    [[ -e "$ROOTFS_DIR/$path" ]] || die "required target file is missing: /$path"
+    [[ -e "$ROOTFS_DIR/$path" || -L "$ROOTFS_DIR/$path" ]] ||
+      die "required target file is missing: /$path"
   done
   [[ -x "$ROOTFS_DIR/usr/local/lib/blade-firstboot/gpu.sh" ]] ||
     die 'GPU gate library is not executable'
@@ -199,7 +200,8 @@ verify_codex_permissions() {
   [[ -z "$bad_path" ]] || die "non-root-owned Codex path: $bad_path"
   bad_path=$(find "$ROOTFS_DIR/opt/codex" -type d ! -perm -0005 -print -quit)
   [[ -z "$bad_path" ]] || die "Codex directory is not world-readable/executable: $bad_path"
-  [[ -x "$ROOTFS_DIR/usr/local/bin/codex" ]] || die 'global Codex executable is missing'
+  arch-chroot "$ROOTFS_DIR" test -x /usr/local/bin/codex ||
+    die 'global Codex executable is missing'
 }
 
 load_build_manifest() {
