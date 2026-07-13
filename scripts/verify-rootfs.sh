@@ -247,6 +247,8 @@ load_build_manifest() {
       die "duplicate build manifest key: $key"
       return 1
     fi
+    # destination is a nameref to an associative array; $key must expand here.
+    # shellcheck disable=SC2004
     destination[$key]=$value
   done <"$BUILD_MANIFEST"
 
