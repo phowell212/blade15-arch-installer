@@ -13,7 +13,7 @@ case "$scenario" in
     printf 'QEMU serial rescue test\n'
     exit 0
     ;;
-  success | nonzero | signal) ;;
+  success | nonzero | signal | missing-target-setting | missing-default-setting) ;;
   *)
     printf 'unknown fake scenario: %s\n' "$scenario" >&2
     exit 64
@@ -22,6 +22,18 @@ esac
 
 printf 'QEMU serial rescue test\n'
 IFS= read -r _
+case "$scenario" in
+  missing-target-setting)
+    printf 'TARGET_MOUNT is required\n'
+    sleep 5
+    exit 0
+    ;;
+  missing-default-setting)
+    printf 'DEFAULT_HOSTNAME is required\n'
+    sleep 5
+    exit 0
+    ;;
+esac
 if [[ "$mode" == rescue ]]; then
   printf '\033[31mroot\033[39m@archiso ~ # '
   IFS= read -r _

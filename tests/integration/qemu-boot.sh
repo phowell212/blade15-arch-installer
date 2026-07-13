@@ -55,12 +55,21 @@ assert_disk_unmodified() {
 }
 
 run_qemu_tests() {
+  local requested_mode=$1
   local accel=tcg
   local iso
+  local mode
   local ovmf_code
   local ovmf_pair
   local ovmf_vars
   local -a isos=()
+  local -a modes=()
+
+  if [[ $requested_mode == all ]]; then
+    modes=(installer rescue)
+  else
+    modes=("$requested_mode")
+  fi
 
   mapfile -d '' -t isos < <(
     find "$REPO_ROOT/dist" -maxdepth 1 -type f \
@@ -77,15 +86,12 @@ run_qemu_tests() {
   reset_build_directory "$TEST_DIR" >/dev/null
   trap cleanup_qemu_test EXIT
   qemu-img create -q -f qcow2 "$DISK_IMAGE" 64G
-  cp -- "$ovmf_vars" "$OVMF_VARS_COPY"
-  expect "$EXPECT_SCRIPT" rescue "$iso" "$DISK_IMAGE" "$ovmf_code" \
-    "$OVMF_VARS_COPY" "$accel"
-  assert_disk_unmodified
-
-  cp -- "$ovmf_vars" "$OVMF_VARS_COPY"
-  expect "$EXPECT_SCRIPT" installer "$iso" "$DISK_IMAGE" "$ovmf_code" \
-    "$OVMF_VARS_COPY" "$accel"
-  assert_disk_unmodified
+  for mode in "${modes[@]}"; do
+    cp -- "$ovmf_vars" "$OVMF_VARS_COPY"
+    expect "$EXPECT_SCRIPT" "$mode" "$iso" "$DISK_IMAGE" "$ovmf_code" \
+      "$OVMF_VARS_COPY" "$accel"
+    assert_disk_unmodified
+  done
 
   cleanup_qemu_test
   trap - EXIT
@@ -93,21 +99,47 @@ run_qemu_tests() {
 }
 
 main() {
-  if is_dry_run || [[ ${1:-} == --dry-run ]]; then
+  local dry_run=0
+  local mode=all
+
+  if [[ ${1:-} == --dry-run ]]; then
+    dry_run=1
+    shift
+  fi
+  if (($# > 1)); then
+    die 'usage: qemu-boot.sh [--dry-run] [all|installer|rescue]'
+    return 1
+  fi
+  if (($# == 1)); then
+    mode=$1
+  fi
+  case "$mode" in
+    all | installer | rescue) ;;
+    *)
+      die 'usage: qemu-boot.sh [--dry-run] [all|installer|rescue]'
+      return 1
+      ;;
+  esac
+
+  if ((dry_run)) || is_dry_run; then
+    printf '%s\n' 'boot release ISO with QEMU/OVMF and a disposable NVMe disk'
+    if [[ $mode == all || $mode == installer ]]; then
+      printf '%s\n' 'boot QEMU serial installer test and send CANCEL instead of WIPE'
+    fi
+    if [[ $mode == all || $mode == rescue ]]; then
+      printf '%s\n' \
+        'verify QEMU bypass rejection without blade.test=1 from serial rescue'
+    fi
     printf '%s\n' \
-      'boot release ISO with QEMU/OVMF and a disposable NVMe disk' \
-      'verify QEMU bypass rejection without blade.test=1 from serial rescue' \
-      'boot QEMU serial installer test and send CANCEL instead of WIPE' \
       'verify qemu-img map contains no allocated guest data' \
       'qemu boot: CI-DEFERRED'
     return 0
   fi
-  (($# == 0)) || die 'usage: qemu-boot.sh [--dry-run]'
   for command_name in qemu-system-x86_64 qemu-img expect jq; do
     command -v "$command_name" >/dev/null || die "$command_name is required"
   done
   [[ -x "$EXPECT_SCRIPT" ]] || die "Expect harness is not executable: $EXPECT_SCRIPT"
-  run_qemu_tests
+  run_qemu_tests "$mode"
 }
 
 main "$@"

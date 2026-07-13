@@ -22,12 +22,22 @@ proc fail {message} {
 }
 
 proc expect_transition {pattern timeout_message eof_message} {
-    global spawn_id
+    global mode spawn_id
 
-    expect -i $spawn_id \
-        -re $pattern { return } \
-        timeout [list fail $timeout_message] \
-        eof [list fail $eof_message]
+    if {$mode eq "installer"} {
+        expect -i $spawn_id \
+            -re {(TARGET|DEFAULT)_[[:alnum:]_]+ is required} {
+                fail "installer reported missing runtime setting: $expect_out(0,string)"
+            } \
+            -re $pattern { return } \
+            timeout [list fail $timeout_message] \
+            eof [list fail $eof_message]
+    } else {
+        expect -i $spawn_id \
+            -re $pattern { return } \
+            timeout [list fail $timeout_message] \
+            eof [list fail $eof_message]
+    }
 }
 
 proc send_checked {text description} {

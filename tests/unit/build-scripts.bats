@@ -898,6 +898,37 @@ teardown() {
   grep -F 'qemu boot: PASS' "$harness"
 }
 
+@test "QEMU harness exposes isolated installer, rescue, and all modes" {
+  local harness="$REPO_ROOT/tests/integration/qemu-boot.sh"
+
+  run env BLADE_DRY_RUN=1 "$harness" installer
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'boot QEMU serial installer test and send CANCEL instead of WIPE'* ]]
+  [[ "$output" != *'verify QEMU bypass rejection without blade.test=1 from serial rescue'* ]]
+
+  run env BLADE_DRY_RUN=1 "$harness" rescue
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'verify QEMU bypass rejection without blade.test=1 from serial rescue'* ]]
+  [[ "$output" != *'boot QEMU serial installer test and send CANCEL instead of WIPE'* ]]
+
+  run env BLADE_DRY_RUN=1 "$harness" all
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'boot QEMU serial installer test and send CANCEL instead of WIPE'* ]]
+  [[ "$output" == *'verify QEMU bypass rejection without blade.test=1 from serial rescue'* ]]
+}
+
+@test "QEMU harness rejects invalid mode arguments even during dry-run" {
+  local harness="$REPO_ROOT/tests/integration/qemu-boot.sh"
+
+  run env BLADE_DRY_RUN=1 "$harness" invalid
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'usage: qemu-boot.sh [--dry-run] [all|installer|rescue]'* ]]
+
+  run env BLADE_DRY_RUN=1 "$harness" installer rescue
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'usage: qemu-boot.sh [--dry-run] [all|installer|rescue]'* ]]
+}
+
 @test "Expect harness accepts successful rescue and installer fake children" {
   local mode
 
@@ -905,6 +936,22 @@ teardown() {
     run env QEMU_EXPECT_TIMEOUT=3 expect "$QEMU_EXPECT" \
       --fake "$mode" success "$QEMU_FAKE_CHILD"
     [ "$status" -eq 0 ]
+  done
+}
+
+@test "Expect installer fails immediately on missing runtime settings" {
+  local expected
+  local scenario
+
+  for scenario in missing-target-setting missing-default-setting; do
+    case "$scenario" in
+      missing-target-setting) expected='TARGET_MOUNT is required' ;;
+      missing-default-setting) expected='DEFAULT_HOSTNAME is required' ;;
+    esac
+    run env QEMU_EXPECT_TIMEOUT=1 expect "$QEMU_EXPECT" \
+      --fake installer "$scenario" "$QEMU_FAKE_CHILD"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"installer reported missing runtime setting: $expected"* ]]
   done
 }
 

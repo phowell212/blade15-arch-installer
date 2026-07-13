@@ -69,16 +69,19 @@ setup() {
   [ "$output" = $'dist/*.iso\ndist/*.sha256\ndist/*manifest*' ]
 }
 
-@test "CI build publishes its marker only after artifact verification" {
+@test "CI build publishes its marker only after artifact verification and positive startup" {
+  local installer_line
   local marker_line
-  local qemu_line
+  local rescue_line
   local verify_line
 
   grep -Fq 'rm -f -- "$REPO_ROOT/dist/.verified"' "$CI_BUILD"
   verify_line=$(grep -n -m1 './scripts/verify-artifacts.sh' "$CI_BUILD" | cut -d: -f1)
+  installer_line=$(grep -n -m1 './tests/integration/qemu-boot.sh installer' "$CI_BUILD" | cut -d: -f1)
   marker_line=$(grep -n -m1 ': >"$REPO_ROOT/dist/.verified"' "$CI_BUILD" | cut -d: -f1)
-  qemu_line=$(grep -n -m1 './tests/integration/qemu-boot.sh' "$CI_BUILD" | cut -d: -f1)
+  rescue_line=$(grep -n -m1 './tests/integration/qemu-boot.sh rescue' "$CI_BUILD" | cut -d: -f1)
 
-  [ "$verify_line" -lt "$marker_line" ]
-  [ "$marker_line" -lt "$qemu_line" ]
+  [ "$verify_line" -lt "$installer_line" ]
+  [ "$installer_line" -lt "$marker_line" ]
+  [ "$marker_line" -lt "$rescue_line" ]
 }

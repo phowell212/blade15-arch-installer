@@ -65,6 +65,7 @@ main() {
   ./tests/integration/loop-install.sh
   ./scripts/build-iso.sh
   ./scripts/verify-artifacts.sh
+  ./tests/integration/qemu-boot.sh installer
   : >"$REPO_ROOT/dist/.verified"
 
   install -Dm0755 src/installer/blade-install /usr/local/bin/blade-install
@@ -77,7 +78,7 @@ main() {
     src/live-rootfs/etc/systemd/system/blade-installer-serial.service \
     src/live-rootfs/etc/systemd/system/blade-qemu-rescue.service \
     src/target-rootfs/etc/systemd/system/blade-firstboot-gpu.service
-  ./tests/integration/qemu-boot.sh
+  ./tests/integration/qemu-boot.sh rescue
 }
 
 main "$@"
