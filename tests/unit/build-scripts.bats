@@ -867,13 +867,17 @@ teardown() {
   [ "$status" -eq 0 ]
   grep -Fx 'TTYPath=/dev/tty1' "$physical"
   grep -Fx 'ConditionKernelCommandLine=!blade.test=1' "$physical"
+  grep -Fx 'Conflicts=getty@tty1.service' "$physical"
+  ! grep -Eq '^Conflicts=.*blade-(installer|qemu)' "$physical"
   grep -Fx 'TTYPath=/dev/ttyS0' "$serial"
   grep -Fx 'ConditionKernelCommandLine=blade.test=1' "$serial"
   grep -Fx 'ConditionKernelCommandLine=!blade.noinstaller=1' "$serial"
-  grep -Fx 'Conflicts=serial-getty@ttyS0.service blade-installer.service' "$serial"
+  grep -Fx 'Conflicts=serial-getty@ttyS0.service' "$serial"
+  ! grep -Eq '^Conflicts=.*blade-(installer|qemu)' "$serial"
   grep -Fx 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' "$serial"
   grep -Fx 'ConditionKernelCommandLine=blade.noinstaller=1' "$rescue"
-  grep -Fx 'Conflicts=serial-getty@ttyS0.service blade-installer.service blade-installer-serial.service' "$rescue"
+  grep -Fx 'Conflicts=serial-getty@ttyS0.service' "$rescue"
+  ! grep -Eq '^Conflicts=.*blade-(installer|qemu)' "$rescue"
   grep -Fx 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' "$rescue"
 }
 
@@ -1566,15 +1570,16 @@ teardown() {
     specs=(
       "blade-installer.service|ConditionKernelCommandLine=!blade.noinstaller=1"
       "blade-installer.service|ConditionKernelCommandLine=!blade.test=1"
+      "blade-installer.service|Conflicts=getty@tty1.service"
       "blade-installer.service|TTYPath=/dev/tty1"
       "blade-installer-serial.service|ConditionKernelCommandLine=blade.test=1"
       "blade-installer-serial.service|ConditionKernelCommandLine=!blade.noinstaller=1"
-      "blade-installer-serial.service|Conflicts=serial-getty@ttyS0.service blade-installer.service"
+      "blade-installer-serial.service|Conflicts=serial-getty@ttyS0.service"
       "blade-installer-serial.service|ExecCondition=/usr/local/bin/blade-qemu-serial-gate"
       "blade-installer-serial.service|TTYPath=/dev/ttyS0"
       "blade-qemu-rescue.service|ConditionKernelCommandLine=blade.test=1"
       "blade-qemu-rescue.service|ConditionKernelCommandLine=blade.noinstaller=1"
-      "blade-qemu-rescue.service|Conflicts=serial-getty@ttyS0.service blade-installer.service blade-installer-serial.service"
+      "blade-qemu-rescue.service|Conflicts=serial-getty@ttyS0.service"
       "blade-qemu-rescue.service|ExecCondition=/usr/local/bin/blade-qemu-serial-gate"
     )
     for spec in "${specs[@]}"; do
@@ -1593,6 +1598,73 @@ teardown() {
       mv "$file.clean" "$file"
       [[ $verify_status -ne 0 ]] || {
         printf "accepted commented guard %s in %s\n" "$required" "$unit" >&2
+        exit 1
+      }
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact service verification rejects cross-route conflict dependencies" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    INNER_ROOT=$2/airootfs
+    verify_service_units
+    for unit in blade-installer.service blade-installer-serial.service blade-qemu-rescue.service; do
+      file=$INNER_ROOT/etc/systemd/system/$unit
+      cp "$file" "$file.clean"
+      printf "  Conflicts = blade-installer.service\n" >>"$file"
+      set +e
+      verify_service_units >/dev/null 2>&1
+      verify_status=$?
+      set -e
+      mv "$file.clean" "$file"
+      [[ $verify_status -ne 0 ]] || {
+        printf "accepted cross-route conflict in %s\n" "$unit" >&2
+        exit 1
+      }
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact service verification rejects route service drop-ins" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    INNER_ROOT=$2/airootfs
+    verify_service_units
+    specs=(
+      "etc|blade-installer.service.d"
+      "etc|blade-installer-serial.service.d"
+      "etc|blade-qemu-rescue.service.d"
+      "etc|blade-.service.d"
+      "etc|blade-installer-.service.d"
+      "etc|blade-qemu-.service.d"
+      "etc|service.d"
+      "run|blade-installer.service.d"
+      "usr/local/lib|blade-installer.service.d"
+      "usr/lib|blade-installer.service.d"
+    )
+    for spec in "${specs[@]}"; do
+      root=${spec%%|*}
+      dropin=${spec#*|}
+      dropin_dir=$INNER_ROOT/$root/systemd/system/$dropin
+      mkdir -p "$dropin_dir"
+      printf "[Unit]\nConflicts=blade-installer.service\n" >"$dropin_dir/override.conf"
+      set +e
+      verify_service_units >/dev/null 2>&1
+      verify_status=$?
+      set -e
+      rm "$dropin_dir/override.conf"
+      rmdir "$dropin_dir"
+      [[ $verify_status -ne 0 ]] || {
+        printf "accepted inherited drop-in at %s\n" "$spec" >&2
         exit 1
       }
     done

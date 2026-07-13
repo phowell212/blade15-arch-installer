@@ -502,6 +502,43 @@ require_unit_line() {
     die "service unit must contain one exact active line '$required': $unit"
 }
 
+require_only_unit_directive() {
+  local unit=$1
+  local directive=$2
+  local required=$3
+  local -a active=()
+
+  mapfile -t active < <(
+    grep -E "^[[:space:]]*${directive}[[:space:]]*=" "$unit" || true
+  )
+  [[ "${#active[@]}" -eq 1 && "${active[0]}" == "$required" ]] ||
+    die "service unit must contain only exact active directive '$required': $unit"
+}
+
+reject_unit_dropins() {
+  local service=$1
+  local root
+  local dropin
+  local prefix=${service%.*}
+  local unit_type=${service##*.}
+  local -a dropin_names=("$service.d" "$unit_type.d")
+
+  while [[ "$prefix" == *-* ]]; do
+    prefix=${prefix%-*}
+    dropin_names+=("$prefix-.$unit_type.d")
+  done
+
+  for root in etc run usr/local/lib usr/lib; do
+    for dropin in "${dropin_names[@]}"; do
+      dropin="$INNER_ROOT/$root/systemd/system/$dropin"
+      [[ ! -e "$dropin" && ! -L "$dropin" ]] || {
+        die "inner route service must not have applicable drop-ins: $dropin"
+        return
+      }
+    done
+  done
+}
+
 require_enabled_service() {
   local service=$1
   local system_dir="$INNER_ROOT/etc/systemd/system"
@@ -530,24 +567,29 @@ verify_service_units() {
   require_enabled_service blade-installer.service || return
   require_enabled_service blade-installer-serial.service || return
   require_enabled_service blade-qemu-rescue.service || return
+  reject_unit_dropins blade-installer.service || return
+  reject_unit_dropins blade-installer-serial.service || return
+  reject_unit_dropins blade-qemu-rescue.service || return
 
   require_unit_line "$physical" 'ConditionKernelCommandLine=!blade.noinstaller=1' || return
   require_unit_line "$physical" 'ConditionKernelCommandLine=!blade.test=1' || return
+  require_only_unit_directive "$physical" Conflicts \
+    'Conflicts=getty@tty1.service' || return
   require_unit_line "$physical" 'ExecStart=/usr/local/bin/blade-install' || return
   require_unit_line "$physical" 'TTYPath=/dev/tty1' || return
 
   require_unit_line "$serial" 'ConditionKernelCommandLine=blade.test=1' || return
   require_unit_line "$serial" 'ConditionKernelCommandLine=!blade.noinstaller=1' || return
-  require_unit_line "$serial" \
-    'Conflicts=serial-getty@ttyS0.service blade-installer.service' || return
+  require_only_unit_directive "$serial" Conflicts \
+    'Conflicts=serial-getty@ttyS0.service' || return
   require_unit_line "$serial" 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' || return
   require_unit_line "$serial" 'ExecStart=/usr/local/bin/blade-install' || return
   require_unit_line "$serial" 'TTYPath=/dev/ttyS0' || return
 
   require_unit_line "$rescue" 'ConditionKernelCommandLine=blade.test=1' || return
   require_unit_line "$rescue" 'ConditionKernelCommandLine=blade.noinstaller=1' || return
-  require_unit_line "$rescue" \
-    'Conflicts=serial-getty@ttyS0.service blade-installer.service blade-installer-serial.service' || return
+  require_only_unit_directive "$rescue" Conflicts \
+    'Conflicts=serial-getty@ttyS0.service' || return
   require_unit_line "$rescue" 'ExecCondition=/usr/local/bin/blade-qemu-serial-gate' || return
   require_unit_line "$rescue" \
     'ExecStart=-/usr/bin/agetty --autologin root --noclear 115200 ttyS0 vt100' || return
