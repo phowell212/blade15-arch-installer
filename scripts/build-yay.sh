@@ -14,7 +14,7 @@ print_plan() {
     "yay source: $YAY_AUR_URL" \
     "yay commit: $YAY_AUR_COMMIT" \
     "reset clean Arch build root: $YAY_BUILD_ROOT" \
-    "pacstrap -C $TARGET_PACMAN_CONFIG -K $YAY_BUILD_ROOT base base-devel git sudo" \
+    "pacstrap -C $TARGET_PACMAN_CONFIG -K $YAY_BUILD_ROOT base base-devel git go sudo" \
     "arch-chroot $YAY_BUILD_ROOT useradd --create-home --user-group builder" \
     "clone $YAY_AUR_URL as builder" \
     "verify git rev-parse HEAD equals $YAY_AUR_COMMIT" \
@@ -52,7 +52,7 @@ main() {
   find "$PACKAGE_DIR" -maxdepth 1 -type f -name 'yay-*.pkg.tar.zst' -delete
 
   pacstrap -C "$TARGET_PACMAN_CONFIG" -K "$YAY_BUILD_ROOT" \
-    base base-devel git sudo
+    base base-devel git go sudo
   arch-chroot "$YAY_BUILD_ROOT" useradd --create-home --user-group builder
   install -Dm0440 /dev/stdin "$YAY_BUILD_ROOT/etc/sudoers.d/builder" <<'EOF'
 builder ALL=(root) NOPASSWD: /usr/bin/pacman

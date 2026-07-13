@@ -35,7 +35,8 @@ install_dependencies() {
     jq
     libarchive
     parted
-    qemu-full
+    qemu-img
+    qemu-system-x86
     shellcheck
     shfmt
     squashfs-tools

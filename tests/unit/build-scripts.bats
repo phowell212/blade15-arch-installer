@@ -157,7 +157,7 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *'https://aur.archlinux.org/yay.git'* ]]
   [[ "$output" == *'cb43f84828ab4f9700f7c6f9c6d7a923d4cfaff0'* ]]
-  [[ "$output" == *'pacstrap'*'base-devel git sudo'* ]]
+  [[ "$output" == *'pacstrap'*'base-devel git go sudo'* ]]
   [[ "$output" == *'useradd --create-home --user-group builder'* ]]
   [[ "$output" == *'runuser -u builder -- makepkg --syncdeps --cleanbuild --noconfirm'* ]]
   [[ "$output" == *'verify git rev-parse HEAD equals cb43f84828ab4f9700f7c6f9c6d7a923d4cfaff0'* ]]

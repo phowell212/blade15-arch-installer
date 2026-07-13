@@ -14,6 +14,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+
       - name: Run unit and static checks
         run: sudo docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace archlinux:base-devel ./scripts/ci-static.sh
 
