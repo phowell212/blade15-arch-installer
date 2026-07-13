@@ -14,6 +14,7 @@ PACKAGE_MANIFEST="$PAYLOAD_DIR/target-packages.txt"
 BUILD_MANIFEST="$PAYLOAD_DIR/build-manifest.txt"
 CODEX_INSTALLER_URL=https://chatgpt.com/codex/install.sh
 CODEX_INSTALLER="$BUILD_DIR/codex-install.sh"
+CODEX_INSTALLER_CHROOT=/root/codex-install.sh
 CODEX_INSTALLER_ACTUAL_SHA=
 
 print_plan() {
@@ -27,9 +28,9 @@ print_plan() {
     "copy target overlay: $TARGET_OVERLAY" \
     "download $CODEX_INSTALLER_URL" \
     "verify downloaded installer SHA-256 before execution: $CODEX_INSTALLER_SHA256" \
-    "arch-chroot $ROOTFS_DIR /usr/bin/env CODEX_HOME=/opt/codex CODEX_INSTALL_DIR=/usr/local/bin CODEX_NON_INTERACTIVE=1 CODEX_RELEASE=$CODEX_RELEASE /bin/sh /tmp/codex-install.sh" \
+    "arch-chroot $ROOTFS_DIR /usr/bin/env CODEX_HOME=/opt/codex CODEX_INSTALL_DIR=/usr/local/bin CODEX_NON_INTERACTIVE=1 CODEX_RELEASE=$CODEX_RELEASE /bin/sh $CODEX_INSTALLER_CHROOT" \
     'record codex_installer_sha256= in build-manifest.txt' \
-    'remove /tmp/codex-install.sh immediately after installer execution' \
+    "remove $CODEX_INSTALLER_CHROOT immediately after installer execution" \
     'verify no Codex auth/session files' \
     'verify CODEX_HOME is not exported to users' \
     'lock root account' \
@@ -66,7 +67,7 @@ sanitize_network_secrets() {
 }
 
 remove_codex_installer() {
-  rm -f -- "$CODEX_INSTALLER" "$ROOTFS_DIR/tmp/codex-install.sh"
+  rm -f -- "$CODEX_INSTALLER" "$ROOTFS_DIR$CODEX_INSTALLER_CHROOT"
 }
 
 assert_no_codex_credentials() {
@@ -98,14 +99,14 @@ install_codex() {
     return 1
   fi
 
-  install -Dm0700 "$CODEX_INSTALLER" "$ROOTFS_DIR/tmp/codex-install.sh"
+  install -Dm0700 "$CODEX_INSTALLER" "$ROOTFS_DIR$CODEX_INSTALLER_CHROOT"
   set +e
   arch-chroot "$ROOTFS_DIR" /usr/bin/env \
     CODEX_HOME=/opt/codex \
     CODEX_INSTALL_DIR=/usr/local/bin \
     CODEX_NON_INTERACTIVE=1 \
     CODEX_RELEASE="$CODEX_RELEASE" \
-    /bin/sh /tmp/codex-install.sh >&2
+    /bin/sh "$CODEX_INSTALLER_CHROOT" >&2
   install_status=$?
   set -e
   remove_codex_installer

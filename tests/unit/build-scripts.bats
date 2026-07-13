@@ -220,9 +220,9 @@ teardown() {
   [[ "$output" == *'CODEX_INSTALL_DIR=/usr/local/bin'* ]]
   [[ "$output" == *'CODEX_NON_INTERACTIVE=1'* ]]
   [[ "$output" == *'CODEX_RELEASE=0.144.1'* ]]
-  [[ "$output" == *'/bin/sh /tmp/codex-install.sh'* ]]
+  [[ "$output" == *'/bin/sh /root/codex-install.sh'* ]]
   [[ "$output" == *'record codex_installer_sha256='* ]]
-  [[ "$output" == *'remove /tmp/codex-install.sh immediately'* ]]
+  [[ "$output" == *'remove /root/codex-install.sh immediately'* ]]
   [[ "$output" == *'verify no Codex auth/session files'* ]]
   [[ "$output" == *'verify CODEX_HOME is not exported to users'* ]]
 }
