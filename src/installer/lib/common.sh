@@ -29,7 +29,7 @@ load_installer_config() {
   elif [[ -e "$canonical_path" || -L "$canonical_path" ]]; then
     config_file=$canonical_path
   elif [[ -n "$source_tree_path" &&
-    ( -e "$source_tree_path" || -L "$source_tree_path" ) ]]; then
+    (-e "$source_tree_path" || -L "$source_tree_path") ]]; then
     config_file=$source_tree_path
   else
     config_file=$canonical_path
