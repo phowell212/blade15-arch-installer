@@ -3,6 +3,7 @@
 setup() {
   REPO_ROOT="$(cd -- "$BATS_TEST_DIRNAME/../.." && pwd -P)"
   WORKFLOW="$REPO_ROOT/.github/workflows/build-iso.yml"
+  CI_BUILD="$REPO_ROOT/scripts/ci-build.sh"
 }
 
 @test "ISO workflow is manually dispatched with read-only repository access" {
@@ -26,6 +27,18 @@ setup() {
   static_line=$(grep -n -m1 './scripts/ci-static\.sh' "$WORKFLOW" | cut -d: -f1)
   build_line=$(grep -n -m1 './scripts/ci-build\.sh' "$WORKFLOW" | cut -d: -f1)
   [ "$static_line" -lt "$build_line" ]
+}
+
+@test "CI build installs dependencies before its first Git command" {
+  local git_line
+  local install_line
+
+  install_line=$(grep -n -m1 '^[[:space:]]*install_dependencies$' "$CI_BUILD" | cut -d: -f1)
+  git_line=$(grep -n -m1 '^[[:space:]]*git ' "$CI_BUILD" | cut -d: -f1)
+
+  [ -n "$install_line" ]
+  [ -n "$git_line" ]
+  [ "$install_line" -lt "$git_line" ]
 }
 
 @test "ISO workflow uploads only verified release artifacts for fourteen days" {

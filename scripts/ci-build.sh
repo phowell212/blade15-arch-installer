@@ -53,8 +53,8 @@ main() {
   }
   require_privileged_arch
   cd -- "$REPO_ROOT"
-  git config --global --add safe.directory "$REPO_ROOT"
   install_dependencies
+  git config --global --add safe.directory "$REPO_ROOT"
 
   ./scripts/ci-static.sh
   ./scripts/build-rootfs.sh
