@@ -25,6 +25,7 @@ print_plan() {
     'extract the airootfs image from the ISO' \
     'run unsquashfs into build/artifact-verify/airootfs' \
     'verify inner /usr/local/bin/blade-install mode 0755' \
+    'verify inner /usr/share/blade-installer/build.env mode 0644 and required values' \
     'verify inner /usr/share/blade-installer/rootfs.tar.zst' \
     'verify inner payload checksum and manifests' \
     'verify inner blade-installer.service and serial test service' \
@@ -91,6 +92,63 @@ verify_payload_sidecar() {
   [[ "$manifest_digest" == "$expected" ]] ||
     die 'inner build manifest digest does not match the payload'
 }
+
+config_assignment_value() {
+  local file=$1
+  local variable=$2
+  local -a assignments=()
+
+  mapfile -t assignments < <(grep -E "^${variable}=" "$file" || true)
+  ((${#assignments[@]} == 1)) || return 1
+  printf '%s\n' "${assignments[0]#*=}"
+}
+
+verify_runtime_config() (
+  local config="$INNER_ROOT/usr/share/blade-installer/build.env"
+  local actual
+  local expected
+  local variable
+  local -a required_variables=(
+    TARGET_DMI_VENDOR
+    TARGET_DMI_FAMILY
+    DEFAULT_HOSTNAME
+    DEFAULT_TIMEZONE
+  )
+
+  [[ -f "$config" && ! -L "$config" ]] || {
+    die 'inner runtime configuration is missing or unsafe'
+    return
+  }
+  [[ $(stat -c '%a' "$config") == 644 ]] || {
+    die 'inner runtime configuration is not mode 0644'
+    return
+  }
+  [[ -f "$BUILD_CONFIG" && ! -L "$BUILD_CONFIG" ]] || {
+    die 'source build configuration is missing or unsafe'
+    return
+  }
+  cmp -s "$BUILD_CONFIG" "$config" || {
+    die 'inner runtime configuration differs from the source build configuration'
+    return
+  }
+
+  for variable in "${required_variables[@]}"; do
+    if ! actual=$(config_assignment_value "$config" "$variable") ||
+      [[ -z "$actual" ]]; then
+      die "inner runtime configuration lacks required value: $variable"
+      return
+    fi
+    if ! expected=$(config_assignment_value "$BUILD_CONFIG" "$variable") ||
+      [[ -z "$expected" ]]; then
+      die "source build configuration lacks required value: $variable"
+      return
+    fi
+    [[ "$actual" == "$expected" ]] || {
+      die "inner runtime configuration has unexpected value: $variable"
+      return
+    }
+  done
+)
 
 extract_grub_stanza() {
   local file=$1
@@ -469,6 +527,7 @@ verify_inner_root() {
       $(stat -c '%a' "$INNER_ROOT/usr/local/lib/blade-installer/$library.sh") == 755 ]] ||
       die "inner installer library is missing or not mode 0755: $library.sh"
   done
+  verify_runtime_config
   for artifact in rootfs.tar.zst rootfs.tar.zst.sha256 target-packages.txt \
     build-manifest.txt; do
     [[ -f "$payload_dir/$artifact" && ! -L "$payload_dir/$artifact" ]] ||

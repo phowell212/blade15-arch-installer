@@ -3,12 +3,8 @@
 _installer_lib_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$_installer_lib_dir/common.sh"
-_build_env_file=${BUILD_ENV_FILE:-"$_installer_lib_dir/../../../config/build.env"}
-if [[ -r "$_build_env_file" ]]; then
-  # shellcheck source=/dev/null
-  source "$_build_env_file"
-fi
-unset _installer_lib_dir _build_env_file
+load_installer_config "$_installer_lib_dir/../../../config/build.env"
+unset _installer_lib_dir
 
 : "${TARGET_DMI_VENDOR:?TARGET_DMI_VENDOR is required}"
 : "${TARGET_DMI_FAMILY:?TARGET_DMI_FAMILY is required}"

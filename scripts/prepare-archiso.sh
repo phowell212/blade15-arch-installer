@@ -38,10 +38,12 @@ print_plan() {
     'profiledef permission /usr/local/bin/blade-install=0:0:755' \
     'profiledef permission /usr/local/bin/blade-qemu-serial-gate=0:0:755' \
     'profiledef permission /usr/local/lib/blade-installer/common.sh=0:0:755' \
+    'profiledef permission /usr/share/blade-installer/build.env=0:0:644' \
     'replace releng bootmodes with bios.syslinux and uefi.grub' \
     'enable blade-installer.service, blade-installer-serial.service, and blade-qemu-rescue.service' \
     'embed /usr/share/blade-installer/rootfs.tar.zst' \
     'embed /usr/share/blade-installer/rootfs.tar.zst.sha256' \
+    'embed /usr/share/blade-installer/build.env mode 0644' \
     'embed /usr/share/blade-installer/target-packages.txt' \
     'embed /usr/share/blade-installer/build-manifest.txt' \
     "patch active UEFI GRUB default entry with $SAFE_BOOT_ARGS" \
@@ -94,6 +96,7 @@ validate_inputs() {
   require_file "$RELENG_PROFILE/syslinux/archiso_pxe-linux.cfg"
 
   require_file "$LIVE_PACKAGE_LIST"
+  require_file "$BUILD_CONFIG"
   [[ -d "$LIVE_OVERLAY" ]] || die "missing live overlay: $LIVE_OVERLAY"
   require_file "$INSTALLER_SOURCE/blade-install"
   require_file "$LIVE_OVERLAY/usr/local/bin/blade-qemu-serial-gate"
@@ -153,6 +156,7 @@ file_permissions+=(
   ["/usr/local/lib/blade-installer/identity.sh"]="0:0:755"
   ["/usr/local/lib/blade-installer/install.sh"]="0:0:755"
   ["/usr/local/lib/blade-installer/preflight.sh"]="0:0:755"
+  ["/usr/share/blade-installer/build.env"]="0:0:644"
 )
 EOF
 }
@@ -251,6 +255,8 @@ install_profile_contents() {
       "$AIROOTFS_DIR/usr/local/lib/blade-installer/$library.sh"
   done
   install -d -m0755 "$AIROOTFS_DIR/usr/share/blade-installer"
+  install -m0644 "$BUILD_CONFIG" \
+    "$AIROOTFS_DIR/usr/share/blade-installer/build.env"
   install -m0644 "$PAYLOAD_DIR/rootfs.tar.zst" \
     "$PAYLOAD_DIR/rootfs.tar.zst.sha256" \
     "$PAYLOAD_DIR/target-packages.txt" \
@@ -281,6 +287,7 @@ install_profile_contents() {
 verify_prepared_profile() {
   local library
   local package
+  local runtime_config="$AIROOTFS_DIR/usr/share/blade-installer/build.env"
 
   while IFS= read -r package || [[ -n "$package" ]]; do
     [[ -z "$package" || "$package" == \#* ]] && continue
@@ -298,6 +305,13 @@ verify_prepared_profile() {
       "$PROFILE_DIR/profiledef.sh" ||
       die "profiledef lacks explicit mode for $library.sh"
   done
+  [[ -f "$runtime_config" && ! -L "$runtime_config" ]] ||
+    die 'prepared runtime configuration is missing or unsafe'
+  cmp -s "$BUILD_CONFIG" "$runtime_config" ||
+    die 'prepared runtime configuration differs from the build configuration'
+  grep -Fq '["/usr/share/blade-installer/build.env"]="0:0:644"' \
+    "$PROFILE_DIR/profiledef.sh" ||
+    die 'profiledef lacks explicit runtime configuration mode'
   grep -Fq '["/usr/local/bin/blade-install"]="0:0:755"' \
     "$PROFILE_DIR/profiledef.sh" || die 'profiledef lacks explicit installer mode'
   grep -Fq '["/usr/local/bin/blade-qemu-serial-gate"]="0:0:755"' \

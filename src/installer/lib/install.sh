@@ -7,14 +7,10 @@ source "$_install_lib_dir/common.sh"
 source "$_install_lib_dir/identity.sh"
 # shellcheck source=/dev/null
 source "$_install_lib_dir/disks.sh"
-_build_env_file=${BUILD_ENV_FILE:-"$_install_lib_dir/../../../config/build.env"}
-if [[ -r "$_build_env_file" ]]; then
-  # shellcheck source=/dev/null
-  source "$_build_env_file"
-fi
+load_installer_config "$_install_lib_dir/../../../config/build.env"
 DEFAULT_TARGET_CONFIG_SOURCE="$_install_lib_dir/../../target-rootfs"
 _CANONICAL_TARGET_MOUNT=''
-unset _install_lib_dir _build_env_file
+unset _install_lib_dir
 
 : "${DEFAULT_TIMEZONE:?DEFAULT_TIMEZONE is required}"
 

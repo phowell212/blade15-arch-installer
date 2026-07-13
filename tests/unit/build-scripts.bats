@@ -602,9 +602,11 @@ teardown() {
   done
   [[ "$output" == *'profiledef permission /usr/local/bin/blade-install=0:0:755'* ]]
   [[ "$output" == *'profiledef permission /usr/local/lib/blade-installer/common.sh=0:0:755'* ]]
+  [[ "$output" == *'profiledef permission /usr/share/blade-installer/build.env=0:0:644'* ]]
   [[ "$output" == *'enable blade-installer.service'* ]]
   [[ "$output" == *'embed /usr/share/blade-installer/rootfs.tar.zst'* ]]
   [[ "$output" == *'embed /usr/share/blade-installer/rootfs.tar.zst.sha256'* ]]
+  [[ "$output" == *'embed /usr/share/blade-installer/build.env mode 0644'* ]]
   [[ "$output" == *'embed /usr/share/blade-installer/target-packages.txt'* ]]
   [[ "$output" == *'embed /usr/share/blade-installer/build-manifest.txt'* ]]
   [[ "$output" == *'replace releng bootmodes with bios.syslinux and uefi.grub'* ]]
@@ -636,6 +638,7 @@ teardown() {
   [[ "$output" == *'extract the airootfs image from the ISO'* ]]
   [[ "$output" == *'unsquashfs'* ]]
   [[ "$output" == *'verify inner /usr/local/bin/blade-install mode 0755'* ]]
+  [[ "$output" == *'verify inner /usr/share/blade-installer/build.env mode 0644 and required values'* ]]
   [[ "$output" == *'verify inner /usr/share/blade-installer/rootfs.tar.zst'* ]]
   [[ "$output" == *'verify inner payload checksum and manifests'* ]]
   [[ "$output" == *'verify inner blade-installer.service and serial test service'* ]]
@@ -664,6 +667,12 @@ teardown() {
       "[\"/usr/local/lib/blade-installer/$library.sh\"]=\"0:0:755\"" \
       "$ARCHISO_PROFILE_OUTPUT/profiledef.sh"
   done
+  [ -f "$ARCHISO_PROFILE_OUTPUT/airootfs/usr/share/blade-installer/build.env" ]
+  [ ! -L "$ARCHISO_PROFILE_OUTPUT/airootfs/usr/share/blade-installer/build.env" ]
+  cmp -s "$REPO_ROOT/config/build.env" \
+    "$ARCHISO_PROFILE_OUTPUT/airootfs/usr/share/blade-installer/build.env"
+  grep -F '["/usr/share/blade-installer/build.env"]="0:0:644"' \
+    "$ARCHISO_PROFILE_OUTPUT/profiledef.sh"
   grep -F '["/usr/local/bin/blade-qemu-serial-gate"]="0:0:755"' \
     "$ARCHISO_PROFILE_OUTPUT/profiledef.sh"
   run bash -c '
@@ -685,6 +694,47 @@ teardown() {
   grep -R -F 'QEMU serial rescue test' "$ARCHISO_PROFILE_OUTPUT/grub" \
     "$ARCHISO_PROFILE_OUTPUT/syslinux"
   ! grep -R -F '/run/blade-installer' "$ARCHISO_PROFILE_OUTPUT/airootfs"
+}
+
+@test "artifact verification requires the canonical runtime config and its values" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    native_root=$(mktemp -d /tmp/blade-runtime-config.XXXXXX)
+    [[ $native_root == /tmp/blade-runtime-config.* ]] || exit 1
+    trap '\''rm -rf -- "$native_root"'\'' EXIT
+    mkdir -p "$native_root/usr/share/blade-installer"
+    install -m0644 "$2/airootfs/usr/share/blade-installer/build.env" \
+      "$native_root/usr/share/blade-installer/build.env"
+    INNER_ROOT=$native_root
+    config=$INNER_ROOT/usr/share/blade-installer/build.env
+    verify_runtime_config
+    cp "$config" "$config.saved"
+    cases=(missing symlink mode missing-value extra-active)
+    for case_name in "${cases[@]}"; do
+      cp "$config.saved" "$config"
+      chmod 0644 "$config"
+      case "$case_name" in
+        missing) rm "$config" ;;
+        symlink) rm "$config"; ln -s build.env.saved "$config" ;;
+        mode) chmod 0600 "$config" ;;
+        missing-value) sed -i "/^DEFAULT_TIMEZONE=/d" "$config" ;;
+        extra-active) printf "UNEXPECTED_ACTIVE=1\n" >>"$config" ;;
+      esac
+      set +e
+      verify_runtime_config >/dev/null 2>&1
+      verify_status=$?
+      set -e
+      rm -f "$config"
+      [[ $verify_status -ne 0 ]] || {
+        printf "accepted invalid runtime config case: %s\n" "$case_name" >&2
+        exit 1
+      }
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  [ "$status" -eq 0 ]
 }
 
 @test "profile preparation fails before cleanup when a releng family is absent" {
