@@ -13,7 +13,7 @@ _lsblk_json() {
   fi
 
   "${LSBLK_BIN:-lsblk}" --json --bytes \
-    --output NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,RM,MOUNTPOINTS
+    --output NAME,PATH,TYPE,UUID,SIZE,MODEL,SERIAL,TRAN,RM,MOUNTPOINTS
 }
 
 _archiso_search_uuid() {
@@ -22,6 +22,7 @@ _archiso_search_uuid() {
   local match_count=0
   local token
   local uuid=''
+  local uuid_pattern='^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])-([01][0-9]|2[0-3])-[0-5][0-9]-[0-5][0-9]-00$'
   local -a tokens=()
 
   [[ -r "$cmdline_file" ]] || die "Cannot read the kernel command line"
@@ -36,22 +37,23 @@ _archiso_search_uuid() {
   done
 
   ((match_count == 1)) || die "Expected exactly one archisosearchuuid token"
-  [[ "$uuid" =~ ^[0-9]{4}(-[0-9]{2}){6}$ ]] ||
+  [[ "$uuid" =~ $uuid_pattern ]] ||
     die "The archisosearchuuid value is malformed"
   printf '%s\n' "$uuid"
 }
 
-_device_present_in_lsblk() {
+_device_uuid_present_in_lsblk() {
   local device=$1
+  local uuid=$2
   local json
 
   if ! json=$(_lsblk_json); then
     return 1
   fi
-  jq -e --arg device "$device" '
+  jq -e --arg device "$device" --arg uuid "$uuid" '
     def subtree: ., (.children[]? | subtree);
     [.blockdevices[]? | subtree
-      | select((.path // ("/dev/" + .name)) == $device)]
+      | select(.path == $device and .uuid == $uuid)]
     | length == 1
   ' <<<"$json" >/dev/null
 }
@@ -74,8 +76,8 @@ _live_root_source_from_uuid() {
   if [[ -z "${LSBLK_JSON_FILE:-}" && ! -b "$source_path" ]]; then
     die "Live-root source is not a current block device"
   fi
-  _device_present_in_lsblk "$source_path" ||
-    die "Live-root source is absent from current block-device data"
+  _device_uuid_present_in_lsblk "$source_path" "$uuid" ||
+    die "Live-root source and UUID are absent from current block-device data"
 
   printf '%s\n' "$source_path"
 }

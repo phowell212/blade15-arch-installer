@@ -98,6 +98,43 @@ assert_no_candidate_output() {
   [ ! -s "$BLKID_CALL_LOG" ]
 }
 
+@test "copy-to-RAM fallback rejects a nonzero Archiso UUID suffix before blkid" {
+  use_copytoram_fallback
+  CMDLINE_FILE="$BATS_TEST_TMPDIR/cmdline"
+  printf '%s\n' \
+    'quiet archisosearchuuid=2026-07-13-12-34-56-01 copytoram=auto' \
+    >"$CMDLINE_FILE"
+
+  run candidate_disks
+  [ "$status" -ne 0 ]
+  assert_no_candidate_output
+  [ ! -s "$BLKID_CALL_LOG" ]
+}
+
+@test "copy-to-RAM fallback rejects out-of-range Archiso UUID fields before blkid" {
+  local invalid_uuid
+
+  use_copytoram_fallback
+  CMDLINE_FILE="$BATS_TEST_TMPDIR/cmdline"
+  for invalid_uuid in \
+    2026-00-13-12-34-56-00 \
+    2026-13-13-12-34-56-00 \
+    2026-07-00-12-34-56-00 \
+    2026-07-32-12-34-56-00 \
+    2026-07-13-24-34-56-00 \
+    2026-07-13-12-60-56-00 \
+    2026-07-13-12-34-60-00; do
+    : >"$BLKID_CALL_LOG"
+    printf 'quiet archisosearchuuid=%s copytoram=auto\n' \
+      "$invalid_uuid" >"$CMDLINE_FILE"
+
+    run candidate_disks
+    [ "$status" -ne 0 ]
+    assert_no_candidate_output
+    [ ! -s "$BLKID_CALL_LOG" ]
+  done
+}
+
 @test "copy-to-RAM fallback fails closed on duplicate UUID tokens" {
   use_copytoram_fallback
   CMDLINE_FILE="$BATS_TEST_TMPDIR/cmdline"
@@ -147,6 +184,19 @@ assert_no_candidate_output() {
   use_copytoram_fallback
   BLKID_OUTPUT=/dev/sdz1
   export BLKID_OUTPUT
+
+  run candidate_disks
+  [ "$status" -ne 0 ]
+  assert_no_candidate_output
+}
+
+@test "copy-to-RAM fallback fails closed when a matched path was reused by another UUID" {
+  local reused_fixture="$BATS_TEST_TMPDIR/reused-path.json"
+
+  use_copytoram_fallback
+  jq '.blockdevices[1].children[0].uuid = "2026-07-13-12-34-57-00"' \
+    "$LSBLK_JSON_FILE" >"$reused_fixture"
+  LSBLK_JSON_FILE="$reused_fixture"
 
   run candidate_disks
   [ "$status" -ne 0 ]
