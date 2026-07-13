@@ -82,7 +82,7 @@ _phase_preflight() {
   require_supported_platform
   [[ -r "$PAYLOAD_PATH" ]] || die "Root filesystem payload is missing"
   [[ -r "$PAYLOAD_CHECKSUM_PATH" ]] || die "Root filesystem checksum is missing"
-  for command_name in jq lsblk findmnt wipefs sgdisk partprobe udevadm \
+  for command_name in jq lsblk findmnt blkid wipefs sgdisk partprobe udevadm \
     mkfs.fat mkfs.ext4 mount umount sha256sum zstd bsdtar arch-chroot systemctl; do
     command -v "$command_name" >/dev/null || die "Required installer command is missing: $command_name"
   done

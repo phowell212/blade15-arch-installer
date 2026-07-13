@@ -1,0 +1,1 @@
+initrd=\intel-ucode.img initrd=\initramfs-linux.img archisobasedir=arch archisosearchuuid=2026-07-13-12-34-56-00 copytoram=auto quiet
