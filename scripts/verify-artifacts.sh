@@ -11,6 +11,8 @@ ISO_TREE="$VERIFY_DIR/iso"
 INNER_ROOT="$VERIFY_DIR/airootfs"
 SAFE_UNIT_ARG='systemd.unit=multi-user.target'
 SAFE_BLACKLIST_ARG='modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'
+OFFLINE_TIME_MASK_ARG='systemd.mask=systemd-time-wait-sync.service'
+PHYSICAL_TTY_MASK_ARG='systemd.mask=getty@tty1.service'
 RESCUE_LABEL='Rescue shell (no installer)'
 QEMU_TEST_LABEL='QEMU serial installer test'
 QEMU_RESCUE_LABEL='QEMU serial rescue test'
@@ -261,34 +263,59 @@ forbid_kernel_token() {
   [[ "$count" -eq 0 ]] || die "$description contains forbidden kernel token: $forbidden"
 }
 
+forbid_kernel_token_near_match() {
+  local arguments=$1
+  local expected=$2
+  local description=$3
+  local token
+  local -a tokens=()
+
+  read -r -a tokens <<<"$arguments"
+  for token in "${tokens[@]}"; do
+    if [[ "$token" != "$expected" && "$token" == *"$expected"* ]]; then
+      die "$description contains a near-match kernel token for $expected: $token"
+      return
+    fi
+  done
+}
+
 validate_route_kernel_args() {
   local arguments=$1
   local route=$2
   local description=$3
 
+  forbid_kernel_token_near_match "$arguments" "$OFFLINE_TIME_MASK_ARG" \
+    "$description" || return
+  forbid_kernel_token_near_match "$arguments" "$PHYSICAL_TTY_MASK_ARG" \
+    "$description" || return
   require_kernel_token "$arguments" "$SAFE_UNIT_ARG" "$description" || return
   require_kernel_token "$arguments" "$SAFE_BLACKLIST_ARG" "$description" || return
+  require_kernel_token "$arguments" "$OFFLINE_TIME_MASK_ARG" "$description" || return
 
   case "$route" in
     normal)
+      require_kernel_token "$arguments" "$PHYSICAL_TTY_MASK_ARG" "$description" || return
       forbid_kernel_token "$arguments" "$TEST_ARG" "$description" || return
       forbid_kernel_token "$arguments" 'blade.noinstaller=1' "$description" || return
       forbid_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
       forbid_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return
       ;;
     rescue)
+      forbid_kernel_token "$arguments" "$PHYSICAL_TTY_MASK_ARG" "$description" || return
       require_kernel_token "$arguments" 'blade.noinstaller=1' "$description" || return
       forbid_kernel_token "$arguments" "$TEST_ARG" "$description" || return
       forbid_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
       forbid_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return
       ;;
     qemu-installer)
+      forbid_kernel_token "$arguments" "$PHYSICAL_TTY_MASK_ARG" "$description" || return
       require_kernel_token "$arguments" "$TEST_ARG" "$description" || return
       require_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
       require_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return
       forbid_kernel_token "$arguments" 'blade.noinstaller=1' "$description" || return
       ;;
     qemu-rescue)
+      forbid_kernel_token "$arguments" "$PHYSICAL_TTY_MASK_ARG" "$description" || return
       require_kernel_token "$arguments" "$TEST_ARG" "$description" || return
       require_kernel_token "$arguments" "$TTY_CONSOLE_ARG" "$description" || return
       require_kernel_token "$arguments" "$SERIAL_CONSOLE_ARG" "$description" || return

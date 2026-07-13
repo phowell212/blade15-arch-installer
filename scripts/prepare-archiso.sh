@@ -13,7 +13,8 @@ PROFILE_DIR="$BUILD_DIR/archiso-profile"
 RELENG_PROFILE=${RELENG_PROFILE:-/usr/share/archiso/configs/releng}
 AIROOTFS_DIR="$PROFILE_DIR/airootfs"
 
-SAFE_BOOT_ARGS='systemd.unit=multi-user.target modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm'
+SAFE_BOOT_ARGS='systemd.unit=multi-user.target modprobe.blacklist=nouveau,nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm systemd.mask=systemd-time-wait-sync.service'
+PHYSICAL_INSTALLER_BOOT_ARGS='systemd.mask=getty@tty1.service'
 RESCUE_LABEL='Rescue shell (no installer)'
 QEMU_TEST_LABEL='QEMU serial installer test'
 QEMU_TEST_ARGS='blade.test=1 console=tty0 console=ttyS0,115200n8'
@@ -46,8 +47,8 @@ print_plan() {
     'embed /usr/share/blade-installer/build.env mode 0644' \
     'embed /usr/share/blade-installer/target-packages.txt' \
     'embed /usr/share/blade-installer/build-manifest.txt' \
-    "patch active UEFI GRUB default entry with $SAFE_BOOT_ARGS" \
-    "patch Syslinux default entry with $SAFE_BOOT_ARGS" \
+    "patch active UEFI GRUB default entry with $SAFE_BOOT_ARGS $PHYSICAL_INSTALLER_BOOT_ARGS" \
+    "patch Syslinux default entry with $SAFE_BOOT_ARGS $PHYSICAL_INSTALLER_BOOT_ARGS" \
     "add $RESCUE_LABEL with blade.noinstaller=1" \
     "add $QEMU_TEST_LABEL with $QEMU_TEST_ARGS" \
     "add $QEMU_RESCUE_LABEL with $QEMU_TEST_ARGS blade.noinstaller=1"
@@ -112,10 +113,11 @@ validate_inputs() {
 append_safe_args() {
   local file=$1
   local kind=$2
+  local args=$3
   local temporary
 
   temporary=$(mktemp "$BUILD_DIR/.task-6-boot.XXXXXX")
-  if ! awk -v kind="$kind" -v args="$SAFE_BOOT_ARGS" '
+  if ! awk -v kind="$kind" -v args="$args" '
     BEGIN { count = 0 }
     kind == "uefi" && $1 == "options" {
       print $0 " " args
@@ -184,7 +186,8 @@ append_grub_entries() {
   initrd_line=$(awk '$1 == "initrd" && /initramfs-linux\.img([[:space:]]|$)/ { print; exit }' "$file")
   [[ -n "$linux_line" && -n "$initrd_line" ]] ||
     die "cannot derive GRUB Linux entry from $file"
-  append_safe_args "$file" grub
+  append_safe_args "$file" grub \
+    "$SAFE_BOOT_ARGS $PHYSICAL_INSTALLER_BOOT_ARGS"
   linux_line="$linux_line $SAFE_BOOT_ARGS"
   cat >>"$file" <<EOF
 
@@ -216,7 +219,8 @@ append_syslinux_entries() {
   append_line=$(awk '$1 == "APPEND" { print; exit }' "$file")
   [[ -n "$linux_line" && -n "$initrd_line" && -n "$append_line" ]] ||
     die "cannot derive Syslinux Linux entry from $file"
-  append_safe_args "$file" syslinux
+  append_safe_args "$file" syslinux \
+    "$SAFE_BOOT_ARGS $PHYSICAL_INSTALLER_BOOT_ARGS"
   append_line="$append_line $SAFE_BOOT_ARGS"
   cat >>"$file" <<EOF
 
@@ -331,6 +335,10 @@ verify_prepared_profile() {
     die 'active UEFI GRUB entries lack safe boot arguments'
   grep -R -Fq "$SAFE_BOOT_ARGS" "$PROFILE_DIR/syslinux" ||
     die 'Syslinux entries lack safe boot arguments'
+  grep -R -Fq "$PHYSICAL_INSTALLER_BOOT_ARGS" "$PROFILE_DIR/grub" ||
+    die 'active UEFI GRUB entries lack physical installer arguments'
+  grep -R -Fq "$PHYSICAL_INSTALLER_BOOT_ARGS" "$PROFILE_DIR/syslinux" ||
+    die 'Syslinux entries lack physical installer arguments'
   grep -R -Fq 'blade.noinstaller=1' "$PROFILE_DIR/grub" \
     "$PROFILE_DIR/syslinux" || die 'rescue boot entries are missing'
   grep -R -Fq 'blade.test=1' "$PROFILE_DIR/grub" \

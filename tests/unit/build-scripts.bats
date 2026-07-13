@@ -83,6 +83,48 @@ prepare_built_profile_fixture() {
   ' _ "$PREPARE_ARCHISO" "$ARCHISO_FIXTURE" "$ARCHISO_PROFILE_OUTPUT"
 }
 
+assert_prepared_route_token_matrix() {
+  bash -c '
+    source "$1"
+    profile=$2
+    token=$3
+    routes=(normal rescue qemu-installer qemu-rescue)
+    expected=("$4" "$5" "$6" "$7")
+    files=(
+      "$profile/grub/grub.cfg:grub"
+      "$profile/grub/loopback.cfg:grub"
+      "$profile/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$profile/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      for index in "${!routes[@]}"; do
+        route=${routes[index]}
+        case "$route" in
+          normal) id=archlinux; label=arch ;;
+          rescue) id=blade-rescue; label=blade-rescue ;;
+          qemu-installer) id=blade-qemu-test; label=blade-qemu-test ;;
+          qemu-rescue) id=blade-qemu-rescue; label=blade-qemu-rescue ;;
+        esac
+        if [[ $kind == grub ]]; then
+          block=$(extract_grub_stanza "$file" "--id '\''$id'\''") || exit 1
+          arguments=$(extract_grub_kernel_args "$block") || exit 1
+        else
+          block=$(extract_syslinux_stanza "$file" "$label") || exit 1
+          arguments=$(extract_syslinux_kernel_args "$block") || exit 1
+        fi
+        actual=$(kernel_token_count "$arguments" "$token")
+        [[ $actual -eq ${expected[index]} ]] || {
+          printf "%s %s route has %s copies of %s; expected %s\n" \
+            "$file" "$route" "$actual" "$token" "${expected[index]}" >&2
+          exit 1
+        }
+      done
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT" "$@"
+}
+
 prepare_manifest_fixture() {
   source "$REPO_ROOT/scripts/lib/build-common.sh"
   MANIFEST_FIXTURE="$BUILD_DIR/task-5-manifest-fixture"
@@ -696,6 +738,30 @@ teardown() {
   ! grep -R -F '/run/blade-installer' "$ARCHISO_PROFILE_OUTPUT/airootfs"
 }
 
+@test "prepared boot routes carry the offline time-wait mask exactly once" {
+  prepare_built_profile_fixture
+
+  run assert_prepared_route_token_matrix \
+    'systemd.mask=systemd-time-wait-sync.service' 1 1 1 1
+
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
+  [ "$status" -eq 0 ]
+}
+
+@test "prepared boot routes reserve the tty1 getty mask for the physical installer" {
+  prepare_built_profile_fixture
+
+  run assert_prepared_route_token_matrix \
+    'systemd.mask=getty@tty1.service' 1 0 0 0
+
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
+  [ "$status" -eq 0 ]
+}
+
 @test "artifact verification requires the canonical runtime config and its values" {
   prepare_built_profile_fixture
 
@@ -946,6 +1012,227 @@ teardown() {
     verify_boot_entries
   ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
 
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact route verification rejects invalid offline mask tokens route by route" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    token=systemd.mask=systemd-time-wait-sync.service
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    routes=(normal rescue qemu-installer qemu-rescue)
+
+    mutate_route() {
+      local file=$1
+      local kind=$2
+      local route=$3
+      local mutation=$4
+      local value=$5
+      local id
+      local label
+      case "$route" in
+        normal) id=archlinux; label=arch ;;
+        rescue) id=blade-rescue; label=blade-rescue ;;
+        qemu-installer) id=blade-qemu-test; label=blade-qemu-test ;;
+        qemu-rescue) id=blade-qemu-rescue; label=blade-qemu-rescue ;;
+      esac
+      if [[ $kind == grub ]]; then
+        case "$mutation" in
+          remove) sed -i "/--id .$id./,/^}/s| $value||" "$file" ;;
+          duplicate) sed -i "/--id .$id./,/^}/s| $value| $value $value|" "$file" ;;
+          near-match) sed -i "/--id .$id./,/^}/s| $value| x$value|" "$file" ;;
+          add) sed -i "/--id .$id./,/^}/s|^\([[:space:]]*linux .*/vmlinuz-linux.*\)$|\1 $value|" "$file" ;;
+        esac
+      else
+        case "$mutation" in
+          remove) sed -i "/^LABEL $label$/,/^LABEL /s| $value||" "$file" ;;
+          duplicate) sed -i "/^LABEL $label$/,/^LABEL /s| $value| $value $value|" "$file" ;;
+          near-match) sed -i "/^LABEL $label$/,/^LABEL /s| $value| x$value|" "$file" ;;
+          add) sed -i "/^LABEL $label$/,/^LABEL /s/^APPEND .*/& $value/" "$file" ;;
+        esac
+      fi
+    }
+
+    verify_changed_file() {
+      local file=$1
+      local kind=$2
+
+      if [[ $kind == grub ]]; then
+        verify_grub_stanzas "$file"
+      else
+        verify_syslinux_stanzas "$file"
+      fi
+    }
+
+    verify_boot_entries || exit $?
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      for route in "${routes[@]}"; do
+        for mutation in remove duplicate near-match; do
+          cp "$file" "$file.clean"
+          mutate_route "$file" "$kind" "$route" "$mutation" "$token"
+          set +e
+          verify_changed_file "$file" "$kind" >/dev/null 2>&1
+          verify_status=$?
+          set -e
+          mv "$file.clean" "$file"
+          [[ $verify_status -ne 0 ]] || {
+            printf "accepted %s offline mask on %s route in %s\n" \
+              "$mutation" "$route" "$spec" >&2
+            exit 1
+          }
+        done
+
+        case "$route" in
+          normal) destination=rescue ;;
+          rescue) destination=qemu-installer ;;
+          qemu-installer) destination=qemu-rescue ;;
+          qemu-rescue) destination=normal ;;
+        esac
+        cp "$file" "$file.clean"
+        mutate_route "$file" "$kind" "$route" remove "$token"
+        mutate_route "$file" "$kind" "$destination" add "$token"
+        set +e
+        verify_changed_file "$file" "$kind" >/dev/null 2>&1
+        verify_status=$?
+        set -e
+        mv "$file.clean" "$file"
+        [[ $verify_status -ne 0 ]] || {
+          printf "accepted offline mask moved from %s to %s in %s\n" \
+            "$route" "$destination" "$spec" >&2
+          exit 1
+        }
+      done
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
+  [ "$status" -eq 0 ]
+}
+
+@test "artifact route verification rejects invalid tty1 mask ownership route by route" {
+  prepare_built_profile_fixture
+
+  run bash -c '
+    source "$1"
+    ISO_TREE=$2
+    token=systemd.mask=getty@tty1.service
+    files=(
+      "$ISO_TREE/grub/grub.cfg:grub"
+      "$ISO_TREE/grub/loopback.cfg:grub"
+      "$ISO_TREE/syslinux/archiso_sys-linux.cfg:syslinux"
+      "$ISO_TREE/syslinux/archiso_pxe-linux.cfg:syslinux"
+    )
+    nonnormal_routes=(rescue qemu-installer qemu-rescue)
+
+    mutate_route() {
+      local file=$1
+      local kind=$2
+      local route=$3
+      local mutation=$4
+      local value=$5
+      local id
+      local label
+      case "$route" in
+        normal) id=archlinux; label=arch ;;
+        rescue) id=blade-rescue; label=blade-rescue ;;
+        qemu-installer) id=blade-qemu-test; label=blade-qemu-test ;;
+        qemu-rescue) id=blade-qemu-rescue; label=blade-qemu-rescue ;;
+      esac
+      if [[ $kind == grub ]]; then
+        case "$mutation" in
+          remove) sed -i "/--id .$id./,/^}/s| $value||" "$file" ;;
+          duplicate) sed -i "/--id .$id./,/^}/s| $value| $value $value|" "$file" ;;
+          near-match) sed -i "/--id .$id./,/^}/s| $value| x$value|" "$file" ;;
+          add) sed -i "/--id .$id./,/^}/s|^\([[:space:]]*linux .*/vmlinuz-linux.*\)$|\1 $value|" "$file" ;;
+        esac
+      else
+        case "$mutation" in
+          remove) sed -i "/^LABEL $label$/,/^LABEL /s| $value||" "$file" ;;
+          duplicate) sed -i "/^LABEL $label$/,/^LABEL /s| $value| $value $value|" "$file" ;;
+          near-match) sed -i "/^LABEL $label$/,/^LABEL /s| $value| x$value|" "$file" ;;
+          add) sed -i "/^LABEL $label$/,/^LABEL /s/^APPEND .*/& $value/" "$file" ;;
+        esac
+      fi
+    }
+
+    verify_changed_file() {
+      local file=$1
+      local kind=$2
+
+      if [[ $kind == grub ]]; then
+        verify_grub_stanzas "$file"
+      else
+        verify_syslinux_stanzas "$file"
+      fi
+    }
+
+    verify_boot_entries || exit $?
+    for spec in "${files[@]}"; do
+      file=${spec%:*}
+      kind=${spec##*:}
+      for mutation in remove duplicate near-match; do
+        cp "$file" "$file.clean"
+        mutate_route "$file" "$kind" normal "$mutation" "$token"
+        set +e
+        verify_changed_file "$file" "$kind" >/dev/null 2>&1
+        verify_status=$?
+        set -e
+        mv "$file.clean" "$file"
+        [[ $verify_status -ne 0 ]] || {
+          printf "accepted %s tty1 mask on normal route in %s\n" \
+            "$mutation" "$spec" >&2
+          exit 1
+        }
+      done
+
+      for route in "${nonnormal_routes[@]}"; do
+        cp "$file" "$file.clean"
+        mutate_route "$file" "$kind" normal remove "$token"
+        mutate_route "$file" "$kind" "$route" add "$token"
+        set +e
+        verify_changed_file "$file" "$kind" >/dev/null 2>&1
+        verify_status=$?
+        set -e
+        mv "$file.clean" "$file"
+        [[ $verify_status -ne 0 ]] || {
+          printf "accepted tty1 mask moved to %s route in %s\n" \
+            "$route" "$spec" >&2
+          exit 1
+        }
+
+        for invalid in "$token $token" "x$token"; do
+          cp "$file" "$file.clean"
+          mutate_route "$file" "$kind" "$route" add "$invalid"
+          set +e
+          verify_changed_file "$file" "$kind" >/dev/null 2>&1
+          verify_status=$?
+          set -e
+          mv "$file.clean" "$file"
+          [[ $verify_status -ne 0 ]] || {
+            printf "accepted invalid tty1 mask %s on %s route in %s\n" \
+              "$invalid" "$route" "$spec" >&2
+            exit 1
+          }
+        done
+      done
+    done
+  ' _ "$VERIFY_ARTIFACTS" "$ARCHISO_PROFILE_OUTPUT"
+
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
   [ "$status" -eq 0 ]
 }
 
