@@ -46,6 +46,36 @@ proc expect_transition {pattern timeout_message eof_message} {
     }
 }
 
+proc expect_rescue_autologin {} {
+    global spawn_id
+
+    expect -i $spawn_id \
+        -re {archiso login:([^\r\n]*)\r?\n} {
+            set identity [string trim $expect_out(1,string)]
+            if {$identity ne "root (automatic login)"} {
+                fail "selected rescue service emitted unexpected autologin identity: $identity"
+            }
+            return
+        } \
+        timeout { fail "selected rescue service did not emit its root autologin banner" } \
+        eof { fail "child exited before the selected rescue service autologin" }
+}
+
+proc expect_rescue_service_start {} {
+    global spawn_id
+
+    expect -i $spawn_id \
+        -re {(archiso login:)|(Started [^\r\n]*QEMU-only serial rescue shell test)} {
+            if {[info exists expect_out(1,string)] &&
+                $expect_out(1,string) ne ""} {
+                fail "stock serial getty claimed ttyS0 before the selected QEMU route"
+            }
+            return
+        } \
+        timeout { fail "selected QEMU serial rescue service did not start" } \
+        eof { fail "child exited before the selected rescue service started" }
+}
+
 proc send_checked {text description} {
     global spawn_id
 
@@ -141,6 +171,8 @@ expect_transition {QEMU serial rescue test} \
 
 if {$mode eq "rescue"} {
     select_from_start 9
+    expect_rescue_service_start
+    expect_rescue_autologin
     expect_transition {@archiso[^#]*#} \
         "QEMU serial rescue did not reach a root shell" \
         "child exited before the rescue root shell"

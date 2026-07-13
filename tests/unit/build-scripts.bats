@@ -891,6 +891,8 @@ teardown() {
   grep -F 'manufacturer=QEMU' "$expect_script"
   grep -F 'product=Standard PC (Q35 + ICH9)' "$expect_script"
   grep -F 'QEMU serial rescue test' "$expect_script"
+  grep -F 'QEMU-only serial rescue shell test' "$expect_script"
+  grep -F 'root (automatic login)' "$expect_script"
   grep -F 'select_from_start 9' "$expect_script"
   grep -F 'select_from_start 8' "$expect_script"
   grep -F 'send_checked "\033\[B" "boot-menu Down key"' "$expect_script"

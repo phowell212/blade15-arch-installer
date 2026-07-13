@@ -40,6 +40,8 @@ case "$scenario" in
     ;;
 esac
 if [[ "$mode" == rescue ]]; then
+  printf 'Started QEMU-only serial rescue shell test\n'
+  printf 'archiso login: root (automatic login)\n'
   printf '\033[31mroot\033[39m@archiso ~ # '
   IFS= read -r _
   printf '\033[31mroot\033[39m@archiso ~ # '
