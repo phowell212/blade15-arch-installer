@@ -179,6 +179,13 @@ teardown() {
   [ "$pacstrap_line" -lt "$yay_line" ]
 }
 
+@test "rootfs builder installs overlay files with explicit secure modes" {
+  grep -F 'install -Dm0440 "$TARGET_OVERLAY/etc/sudoers.d/10-wheel"' "$BUILD_ROOTFS"
+  grep -F 'install -Dm0755 "$TARGET_OVERLAY/usr/local/lib/blade-firstboot/gpu.sh"' "$BUILD_ROOTFS"
+  grep -F 'install -Dm0755 "$TARGET_OVERLAY/usr/local/sbin/blade-firstboot-gpu"' "$BUILD_ROOTFS"
+  ! grep -F 'cp -a -- "$TARGET_OVERLAY/."' "$BUILD_ROOTFS"
+}
+
 @test "builder and verifier reject an invalid package after valid entries without partial output" {
   local package_list="$REPO_ROOT/build/task-5-invalid-target-packages.txt"
   mkdir -p "$REPO_ROOT/build"

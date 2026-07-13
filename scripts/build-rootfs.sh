@@ -129,7 +129,20 @@ install_codex() {
 
 configure_rootfs() {
   install -Dm0644 "$TARGET_PACMAN_CONFIG" "$ROOTFS_DIR/etc/pacman.conf"
-  cp -a -- "$TARGET_OVERLAY/." "$ROOTFS_DIR/"
+  install -Dm0644 "$TARGET_OVERLAY/etc/mkinitcpio.conf.d/graphics.conf" \
+    "$ROOTFS_DIR/etc/mkinitcpio.conf.d/graphics.conf"
+  install -Dm0644 "$TARGET_OVERLAY/etc/modprobe.d/nvidia.conf" \
+    "$ROOTFS_DIR/etc/modprobe.d/nvidia.conf"
+  install -Dm0440 "$TARGET_OVERLAY/etc/sudoers.d/10-wheel" \
+    "$ROOTFS_DIR/etc/sudoers.d/10-wheel"
+  install -Dm0644 "$TARGET_OVERLAY/etc/systemd/system/blade-firstboot-gpu.service" \
+    "$ROOTFS_DIR/etc/systemd/system/blade-firstboot-gpu.service"
+  install -Dm0644 "$TARGET_OVERLAY/etc/zram-generator.conf" \
+    "$ROOTFS_DIR/etc/zram-generator.conf"
+  install -Dm0755 "$TARGET_OVERLAY/usr/local/lib/blade-firstboot/gpu.sh" \
+    "$ROOTFS_DIR/usr/local/lib/blade-firstboot/gpu.sh"
+  install -Dm0755 "$TARGET_OVERLAY/usr/local/sbin/blade-firstboot-gpu" \
+    "$ROOTFS_DIR/usr/local/sbin/blade-firstboot-gpu"
 
   sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' "$ROOTFS_DIR/etc/locale.gen"
   printf 'LANG=en_US.UTF-8\n' >"$ROOTFS_DIR/etc/locale.conf"
