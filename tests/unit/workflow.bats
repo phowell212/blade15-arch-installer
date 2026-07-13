@@ -50,6 +50,7 @@ setup() {
 }
 
 @test "ISO workflow uploads only verified release artifacts for fourteen days" {
+  grep -Fq "hashFiles('dist/.verified')" "$WORKFLOW"
   grep -Eq '^[[:space:]]*name:[[:space:]]*blade15-arch-gnome-\$\{\{[[:space:]]*github\.run_number[[:space:]]*\}\}$' "$WORKFLOW"
   grep -Eq '^[[:space:]]*retention-days:[[:space:]]*14$' "$WORKFLOW"
   grep -Eq '^[[:space:]]*if-no-files-found:[[:space:]]*error$' "$WORKFLOW"
@@ -66,4 +67,18 @@ setup() {
 
   [ "$status" -eq 0 ]
   [ "$output" = $'dist/*.iso\ndist/*.sha256\ndist/*manifest*' ]
+}
+
+@test "CI build publishes its marker only after artifact verification" {
+  local marker_line
+  local qemu_line
+  local verify_line
+
+  grep -Fq 'rm -f -- "$REPO_ROOT/dist/.verified"' "$CI_BUILD"
+  verify_line=$(grep -n -m1 './scripts/verify-artifacts.sh' "$CI_BUILD" | cut -d: -f1)
+  marker_line=$(grep -n -m1 ': >"$REPO_ROOT/dist/.verified"' "$CI_BUILD" | cut -d: -f1)
+  qemu_line=$(grep -n -m1 './tests/integration/qemu-boot.sh' "$CI_BUILD" | cut -d: -f1)
+
+  [ "$verify_line" -lt "$marker_line" ]
+  [ "$marker_line" -lt "$qemu_line" ]
 }

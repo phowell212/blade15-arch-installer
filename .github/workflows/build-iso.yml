@@ -26,6 +26,7 @@ jobs:
         run: sudo docker run --privileged --rm -v /dev:/dev -v "$GITHUB_WORKSPACE:/workspace" -w /workspace archlinux:base-devel ./scripts/ci-build.sh
 
       - name: Upload verified ISO
+        if: ${{ always() && hashFiles('dist/.verified') != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: blade15-arch-gnome-${{ github.run_number }}

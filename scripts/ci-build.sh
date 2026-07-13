@@ -55,6 +55,7 @@ main() {
   }
   require_privileged_arch
   cd -- "$REPO_ROOT"
+  rm -f -- "$REPO_ROOT/dist/.verified"
   install_dependencies
   git config --global --add safe.directory "$REPO_ROOT"
 
@@ -64,6 +65,7 @@ main() {
   ./tests/integration/loop-install.sh
   ./scripts/build-iso.sh
   ./scripts/verify-artifacts.sh
+  : >"$REPO_ROOT/dist/.verified"
 
   install -Dm0755 src/installer/blade-install /usr/local/bin/blade-install
   install -Dm0755 src/live-rootfs/usr/local/bin/blade-qemu-serial-gate \

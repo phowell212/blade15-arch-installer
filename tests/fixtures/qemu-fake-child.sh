@@ -23,11 +23,11 @@ esac
 printf 'QEMU serial rescue test\n'
 IFS= read -r _
 if [[ "$mode" == rescue ]]; then
-  printf 'root@archiso ~ # '
+  printf '\033[31mroot\033[39m@archiso ~ # '
   IFS= read -r _
-  printf 'root@archiso ~ # '
+  printf '\033[31mroot\033[39m@archiso ~ # '
   IFS= read -r _
-  printf 'unsupported physical platform\nroot@archiso ~ #\n'
+  printf 'unsupported physical platform\n\033[31mroot\033[39m@archiso ~ #\n'
 elif [[ "$mode" == installer ]]; then
   printf 'Razer Blade Arch Linux Installer\nSafe installation targets:\nSelect a target number: '
   IFS= read -r _

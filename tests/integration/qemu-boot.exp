@@ -125,12 +125,12 @@ expect_transition {QEMU serial rescue test} \
 
 if {$mode eq "rescue"} {
     select_from_start 9
-    expect_transition {root@archiso[^#]*#} \
+    expect_transition {@archiso[^#]*#} \
         "QEMU serial rescue did not reach a root shell" \
         "child exited before the rescue root shell"
     send_checked "tr ' ' '\\n' </proc/cmdline | grep -vx 'blade.test=1' | paste -sd' ' - >/tmp/no-test\r" \
         "missing-flag fixture command"
-    expect_transition {root@archiso[^#]*#} \
+    expect_transition {@archiso[^#]*#} \
         "rescue shell did not finish the missing-flag fixture command" \
         "child exited during the missing-flag fixture command"
     send_checked "BLADE_TEST=1 BLADE_FAILURE_SHELL=0 CMDLINE_FILE=/tmp/no-test /usr/local/bin/blade-install\r" \
@@ -138,7 +138,7 @@ if {$mode eq "rescue"} {
     expect_transition {unsupported physical platform} \
         "QEMU bypass was not rejected without blade.test=1" \
         "child exited before the missing-flag rejection"
-    expect_transition {root@archiso[^#]*#} \
+    expect_transition {@archiso[^#]*#} \
         "rescue shell did not return after the missing-flag rejection" \
         "child exited before returning to the rescue shell"
 } else {
