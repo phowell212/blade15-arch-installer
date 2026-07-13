@@ -38,10 +38,9 @@ proc send_checked {text description} {
     }
 }
 
-proc select_from_end {steps_up} {
-    send_checked "\033\[F" "boot-menu End key"
-    for {set index 0} {$index < $steps_up} {incr index} {
-        send_checked "\033\[A" "boot-menu Up key"
+proc select_from_start {steps_down} {
+    for {set index 0} {$index < $steps_down} {incr index} {
+        send_checked "\033\[B" "boot-menu Down key"
     }
     send_checked "\r" "boot-menu selection"
 }
@@ -125,7 +124,7 @@ expect_transition {QEMU serial rescue test} \
     "child exited before the archiso boot menu"
 
 if {$mode eq "rescue"} {
-    select_from_end 0
+    select_from_start 9
     expect_transition {root@archiso[^#]*#} \
         "QEMU serial rescue did not reach a root shell" \
         "child exited before the rescue root shell"
@@ -143,7 +142,7 @@ if {$mode eq "rescue"} {
         "rescue shell did not return after the missing-flag rejection" \
         "child exited before returning to the rescue shell"
 } else {
-    select_from_end 1
+    select_from_start 8
     expect_transition {Razer Blade Arch Linux Installer} \
         "serial installer banner was not displayed" \
         "child exited before the serial installer banner"
