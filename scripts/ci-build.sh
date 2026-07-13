@@ -32,6 +32,7 @@ install_dependencies() {
     git
     go
     gptfdisk
+    grub
     jq
     libarchive
     parted

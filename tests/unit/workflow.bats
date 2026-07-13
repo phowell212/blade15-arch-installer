@@ -43,6 +43,7 @@ setup() {
   [ -n "$install_line" ]
   [ -n "$git_line" ]
   [ "$install_line" -lt "$git_line" ]
+  grep -Eq '^[[:space:]]+grub$' "$CI_BUILD"
   grep -Eq '^[[:space:]]+qemu-img$' "$CI_BUILD"
   grep -Eq '^[[:space:]]+qemu-system-x86$' "$CI_BUILD"
   ! grep -Eq '^[[:space:]]+qemu-full$' "$CI_BUILD"
