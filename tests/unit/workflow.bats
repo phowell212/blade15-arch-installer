@@ -23,7 +23,7 @@ setup() {
   grep -Fq 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' "$WORKFLOW"
   grep -Fq 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' "$WORKFLOW"
   grep -Fq 'archlinux:base-devel ./scripts/ci-static.sh' "$WORKFLOW"
-  grep -Fq 'sudo docker run --privileged --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace archlinux:base-devel ./scripts/ci-build.sh' "$WORKFLOW"
+  grep -Fq 'sudo docker run --privileged --rm -v /dev:/dev -v "$GITHUB_WORKSPACE:/workspace" -w /workspace archlinux:base-devel ./scripts/ci-build.sh' "$WORKFLOW"
   grep -Fq 'sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc' "$WORKFLOW"
 
   free_space_line=$(grep -n -m1 'Free runner disk space' "$WORKFLOW" | cut -d: -f1)
